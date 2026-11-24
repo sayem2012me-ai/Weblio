@@ -1,0 +1,8 @@
+{
+  "name": "Remix  WEBLIO Browser",
+  "description": "A premium, fast, and secure Android browser featuring advanced extension support and a modern, minimalist interface.",
+  "requestFramePermissions": [],
+  "majorCapabilities": [
+    "MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"
+  ]
+}

@@ -1,0 +1,19 @@
+<?xml version="1.0" encoding="utf-8"?>
+<network-security-config>
+    <!-- Strictly trust system CAs only; reject user-added MitM root certificates -->
+    <base-config cleartextTrafficPermitted="true">
+        <trust-anchors>
+            <certificates src="system" />
+        </trust-anchors>
+    </base-config>
+
+    <!-- Enforce strict HTTPS-only transport for WEBLIO threat intelligence, DNS-over-HTTPS, and extension stores -->
+    <domain-config cleartextTrafficPermitted="false">
+        <domain includeSubdomains="true">dns.adguard-dns.com</domain>
+        <domain includeSubdomains="true">dns.quad9.net</domain>
+        <domain includeSubdomains="true">security.cloudflare-dns.com</domain>
+        <domain includeSubdomains="true">chromewebstore.google.com</domain>
+        <domain includeSubdomains="true">urlhaus.abuse.ch</domain>
+        <domain includeSubdomains="true">openphish.com</domain>
+    </domain-config>
+</network-security-config>

@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <color name="weblio_obsidian">#FF010103</color>
+    <color name="weblio_gray_bg">#FF252525</color>
+    <color name="weblio_navy">#FF080D1A</color>
+    <color name="weblio_electric_blue">#FF1D6FFF</color>
+    <color name="weblio_cyan">#FF22D3EE</color>
+    <color name="weblio_purple">#FF7C3AED</color>
+    <color name="black">#FF000000</color>
+    <color name="white">#FFFFFFFF</color>
+</resources>
