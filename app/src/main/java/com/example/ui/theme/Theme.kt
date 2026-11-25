@@ -76,7 +76,7 @@ enum class AppThemeMode(val label: String) {
 
 @Composable
 fun WeblioTheme(
-    themeMode: AppThemeMode = AppThemeMode.DARK,
+    themeMode: AppThemeMode = AppThemeMode.LIGHT,
     content: @Composable () -> Unit
 ) {
     val isDark = when (themeMode) {

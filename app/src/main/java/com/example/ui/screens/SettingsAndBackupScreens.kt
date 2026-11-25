@@ -1,8 +1,12 @@
 package com.example.ui.screens
 
 import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.PickVisualMediaRequest
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.foundation.background
+import androidx.compose.foundation.border
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
@@ -11,6 +15,7 @@ import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.safeDrawing
 import androidx.compose.foundation.layout.width
@@ -21,6 +26,7 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.Backup
 import androidx.compose.material.icons.filled.Delete
+import androidx.compose.material.icons.filled.Image
 import androidx.compose.material.icons.filled.Lock
 import androidx.compose.material.icons.filled.Restore
 import androidx.compose.material3.AlertDialog
@@ -47,12 +53,17 @@ import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
+import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.unit.dp
 import androidx.biometric.BiometricManager
+import coil.compose.AsyncImage
+import coil.request.ImageRequest
 import com.example.data.db.SitePermissionEntity
 import com.example.data.prefs.BrowserSettings
 import com.example.data.prefs.CookiePolicy
@@ -64,6 +75,7 @@ import com.example.ui.BrowserViewModel
 import com.example.ui.theme.AppThemeMode
 import com.example.ui.theme.WeblioCyan
 import com.example.ui.theme.WeblioDanger
+import java.io.File
 import kotlinx.coroutines.launch
 
 @OptIn(ExperimentalMaterial3Api::class)
@@ -82,6 +94,13 @@ fun SettingsScreen(
     val context = LocalContext.current
     var showClearDataDialog by remember { mutableStateOf(false) }
     var homepageDraft by remember(settings.homepageUrl) { mutableStateOf(settings.homepageUrl) }
+    val wallpaperPickerLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.PickVisualMedia()
+    ) { uri ->
+        if (uri != null) {
+            viewModel.setCustomHomeBackground(uri)
+        }
+    }
 
     Scaffold(
         contentWindowInsets = WindowInsets.safeDrawing,
@@ -102,6 +121,7 @@ fun SettingsScreen(
             modifier = Modifier
                 .fillMaxSize()
                 .padding(padding)
+                .testTag("settings_list")
         ) {
             // GENERAL
             item { SettingsSectionHeader("General") }
@@ -176,11 +196,23 @@ fun SettingsScreen(
                     ) { isWhite ->
                         viewModel.setThemeMode(if (isWhite) AppThemeMode.LIGHT else AppThemeMode.DARK)
                     }
+                    SettingsSwitchRow("Force Dark Mode on Web Pages", settings.forceDarkWebPages) { viewModel.setForceDarkWeb(it) }
+                }
+            }
+            item {
+                SettingsCard {
                     Text("Home Wallpaper", style = MaterialTheme.typography.labelLarge)
+                    val customWallpaperFile = remember(settings.customHomeBackgroundPath) {
+                        settings.customHomeBackgroundPath
+                            .takeIf { it.isNotBlank() }
+                            ?.let { File(it) }
+                            ?.takeIf { it.exists() && it.isFile }
+                    }
+                    val hasCustomWallpaper = customWallpaperFile != null
                     Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
                         WallpaperStyle.entries.take(2).forEach { ws ->
                             FilterChip(
-                                selected = settings.wallpaperStyle == ws,
+                                selected = !hasCustomWallpaper && settings.wallpaperStyle == ws,
                                 onClick = { viewModel.setWallpaperStyle(ws) },
                                 label = { Text(ws.label) }
                             )
@@ -189,13 +221,78 @@ fun SettingsScreen(
                     Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
                         WallpaperStyle.entries.drop(2).forEach { ws ->
                             FilterChip(
-                                selected = settings.wallpaperStyle == ws,
+                                selected = !hasCustomWallpaper && settings.wallpaperStyle == ws,
                                 onClick = { viewModel.setWallpaperStyle(ws) },
                                 label = { Text(ws.label) }
                             )
                         }
                     }
-                    SettingsSwitchRow("Force Dark Mode on Web Pages", settings.forceDarkWebPages) { viewModel.setForceDarkWeb(it) }
+                    if (customWallpaperFile != null) {
+                        Box(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .height(104.dp)
+                                .clip(RoundedCornerShape(14.dp))
+                                .border(1.dp, WeblioCyan.copy(alpha = 0.5f), RoundedCornerShape(14.dp))
+                        ) {
+                            AsyncImage(
+                                model = ImageRequest.Builder(context)
+                                    .data(customWallpaperFile)
+                                    .crossfade(true)
+                                    .build(),
+                                contentDescription = "Custom homepage background preview",
+                                contentScale = ContentScale.Crop,
+                                modifier = Modifier
+                                    .fillMaxSize()
+                                    .testTag("settings_custom_home_bg_preview")
+                            )
+                            Text(
+                                text = "Custom Image Active",
+                                style = MaterialTheme.typography.labelSmall,
+                                color = Color.White,
+                                modifier = Modifier
+                                    .align(Alignment.BottomStart)
+                                    .padding(8.dp)
+                                    .clip(RoundedCornerShape(8.dp))
+                                    .background(Color.Black.copy(alpha = 0.6f))
+                                    .padding(horizontal = 8.dp, vertical = 4.dp)
+                            )
+                        }
+                    }
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.spacedBy(8.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Button(
+                            onClick = {
+                                wallpaperPickerLauncher.launch(
+                                    PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly)
+                                )
+                            },
+                            modifier = Modifier
+                                .weight(1f)
+                                .heightIn(min = 48.dp)
+                                .testTag("settings_pick_home_bg_button")
+                        ) {
+                            Icon(Icons.Filled.Image, contentDescription = null)
+                            Spacer(Modifier.width(6.dp))
+                            Text(
+                                text = if (hasCustomWallpaper) "Change Photo" else "Choose Photo",
+                                maxLines = 1
+                            )
+                        }
+                        if (hasCustomWallpaper) {
+                            OutlinedButton(
+                                onClick = { viewModel.clearCustomHomeBackground() },
+                                modifier = Modifier
+                                    .heightIn(min = 48.dp)
+                                    .testTag("settings_clear_home_bg_button")
+                            ) {
+                                Text("Reset")
+                            }
+                        }
+                    }
                     SettingsSwitchRow("Show Quick Links on Home", settings.showQuickLinksOnHome) { viewModel.setShowQuickLinks(it) }
                     SettingsSwitchRow("Compact Bottom Toolbar", settings.compactBottomToolbar) { viewModel.setCompactToolbar(it) }
                 }

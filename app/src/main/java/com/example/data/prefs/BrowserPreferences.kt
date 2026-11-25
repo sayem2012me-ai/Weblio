@@ -137,8 +137,9 @@ data class BrowserSettings(
     val homepageUrl: String = "weblio://home",
     val startupBehavior: StartupBehavior = StartupBehavior.RESTORE_TABS,
     val languageTag: String = "en",
-    val themeMode: AppThemeMode = AppThemeMode.DARK,
-    val wallpaperStyle: WallpaperStyle = WallpaperStyle.COSMIC_OBS,
+    val themeMode: AppThemeMode = AppThemeMode.LIGHT,
+    val wallpaperStyle: WallpaperStyle = WallpaperStyle.ELECTRIC_AURORA,
+    val customHomeBackgroundPath: String = "",
     val forceDarkWebPages: Boolean = false,
     val showQuickLinksOnHome: Boolean = true,
     val compactBottomToolbar: Boolean = false,
@@ -181,6 +182,7 @@ class BrowserPreferences(private val context: Context) {
         val LANGUAGE = stringPreferencesKey("language")
         val THEME_MODE = stringPreferencesKey("theme_mode")
         val WALLPAPER_STYLE = stringPreferencesKey("wallpaper_style")
+        val CUSTOM_HOME_BG_PATH = stringPreferencesKey("custom_home_bg_path")
         val FORCE_DARK_WEB = booleanPreferencesKey("force_dark_web")
         val SHOW_QUICK_LINKS = booleanPreferencesKey("show_quick_links")
         val COMPACT_TOOLBAR = booleanPreferencesKey("compact_toolbar")
@@ -225,10 +227,11 @@ class BrowserPreferences(private val context: Context) {
             languageTag = p[Keys.LANGUAGE] ?: "en",
             themeMode = p[Keys.THEME_MODE]?.let {
                 runCatching { AppThemeMode.valueOf(it) }.getOrNull()
-            } ?: AppThemeMode.DARK,
+            } ?: AppThemeMode.LIGHT,
             wallpaperStyle = p[Keys.WALLPAPER_STYLE]?.let {
                 runCatching { WallpaperStyle.valueOf(it) }.getOrNull()
-            } ?: WallpaperStyle.COSMIC_OBS,
+            } ?: WallpaperStyle.ELECTRIC_AURORA,
+            customHomeBackgroundPath = p[Keys.CUSTOM_HOME_BG_PATH] ?: "",
             forceDarkWebPages = p[Keys.FORCE_DARK_WEB] ?: false,
             showQuickLinksOnHome = p[Keys.SHOW_QUICK_LINKS] ?: true,
             compactBottomToolbar = p[Keys.COMPACT_TOOLBAR] ?: false,
@@ -275,6 +278,7 @@ class BrowserPreferences(private val context: Context) {
     suspend fun setLanguage(lang: String) = context.browserDataStore.edit { it[Keys.LANGUAGE] = lang }
     suspend fun setThemeMode(mode: AppThemeMode) = context.browserDataStore.edit { it[Keys.THEME_MODE] = mode.name }
     suspend fun setWallpaperStyle(style: WallpaperStyle) = context.browserDataStore.edit { it[Keys.WALLPAPER_STYLE] = style.name }
+    suspend fun setCustomHomeBackgroundPath(path: String) = context.browserDataStore.edit { it[Keys.CUSTOM_HOME_BG_PATH] = path }
     suspend fun setForceDarkWeb(enabled: Boolean) = context.browserDataStore.edit { it[Keys.FORCE_DARK_WEB] = enabled }
     suspend fun setShowQuickLinks(show: Boolean) = context.browserDataStore.edit { it[Keys.SHOW_QUICK_LINKS] = show }
     suspend fun setCompactToolbar(compact: Boolean) = context.browserDataStore.edit { it[Keys.COMPACT_TOOLBAR] = compact }

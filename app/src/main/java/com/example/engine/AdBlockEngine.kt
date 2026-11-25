@@ -81,11 +81,13 @@ class AdBlockEngine(private val repository: WeblioRepository) {
 
     init {
         scope.launch {
-            repository.observeAdBlockRules().collect { rules ->
-                val active = rules.filter { it.enabled }
-                val sig = computeRuleStructureSignature(active)
-                if (sig != snapshot.signature || (active.isEmpty() && snapshot.signature != 0)) {
-                    snapshot = buildSnapshot(active, sig)
+            runCatching {
+                repository.observeAdBlockRules().collect { rules ->
+                    val active = rules.filter { it.enabled }
+                    val sig = computeRuleStructureSignature(active)
+                    if (sig != snapshot.signature || (active.isEmpty() && snapshot.signature != 0)) {
+                        snapshot = buildSnapshot(active, sig)
+                    }
                 }
             }
         }
@@ -93,7 +95,7 @@ class AdBlockEngine(private val repository: WeblioRepository) {
         scope.launch {
             while (isActive) {
                 delay(8_000L)
-                flushRuleHits()
+                runCatching { flushRuleHits() }
             }
         }
     }

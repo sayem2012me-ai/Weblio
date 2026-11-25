@@ -80,6 +80,7 @@ import com.example.data.db.ProfileEntity
 import com.example.data.prefs.BrowserSettings
 import com.example.ui.components.ChromeStoreLogoMark
 import com.example.ui.components.EdgeAddonsLogoMark
+import com.example.ui.components.ExtensionLogo
 import com.example.ui.theme.AppThemeMode
 import com.example.ui.theme.WeblioCyan
 import com.example.ui.theme.WeblioDanger
@@ -476,11 +477,10 @@ fun ExtensionsQuickPopup(
                                         .padding(start = 16.dp, top = 8.dp, end = 8.dp, bottom = 8.dp),
                                     verticalAlignment = Alignment.CenterVertically
                                 ) {
-                                    Icon(
-                                        imageVector = Icons.Outlined.Extension,
-                                        contentDescription = null,
-                                        tint = if (ext.enabled) WeblioPeriwinkle else MaterialTheme.colorScheme.onSurfaceVariant,
-                                        modifier = Modifier.size(20.dp)
+                                    ExtensionLogo(
+                                        extension = ext,
+                                        size = 30.dp,
+                                        modifier = Modifier.testTag("popup_ext_logo_${ext.id}")
                                     )
                                     Spacer(Modifier.width(10.dp))
                                     Column(modifier = Modifier.weight(1f)) {

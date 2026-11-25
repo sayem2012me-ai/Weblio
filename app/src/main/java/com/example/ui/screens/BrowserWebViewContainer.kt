@@ -594,7 +594,8 @@ fun BrowserWebViewContainer(
                         progress = 100,
                         isSecureHttps = targetUrl.startsWith("https://"),
                         canGoBack = view?.canGoBack() ?: false,
-                        canGoForward = view?.canGoForward() ?: false
+                        canGoForward = view?.canGoForward() ?: false,
+                        rendererCrashCount = 0
                     )
                 }
                 viewModel.onPageCommitted(latestTab, targetUrl, pageTitle)
@@ -969,6 +970,14 @@ fun BrowserWebViewContainer(
             }
         }
 
+        runCatching {
+            webView.onResume()
+            webView.resumeTimers()
+            if (viewModel.consumeWebViewCacheClear(webView)) {
+                webView.clearCache(true)
+            }
+        }
+
         onDispose {
             if (viewModel.tabRuntime.value[latestTab.id]?.isLoading != true) {
                 viewModel.captureTabPreview(latestTab.id)
@@ -978,6 +987,9 @@ fun BrowserWebViewContainer(
 
     LaunchedEffect(tab.id, tab.url, webViewInstanceVersion, errorBanner) {
         if (errorBanner == null && viewModel.shouldDispatchInitialLoad(tab.id, tab.url, webView)) {
+            if (viewModel.consumeWebViewCacheClear(webView)) {
+                runCatching { webView.clearCache(true) }
+            }
             if (tab.desktopMode || settings.desktopModeDefault || ExtensionEngine.isExtensionStoreUrl(tab.url)) {
                 BrowserViewModel.applyDesktopUserAgent(webView, true, forceInitialScale = true)
             }

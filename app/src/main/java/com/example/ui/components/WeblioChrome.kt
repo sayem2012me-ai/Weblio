@@ -951,12 +951,12 @@ fun ExtensionPopupDialog(
                         .padding(horizontal = 16.dp, vertical = 10.dp),
                     verticalAlignment = Alignment.CenterVertically
                 ) {
-                    Icon(
-                        imageVector = Icons.Outlined.Extension,
-                        contentDescription = null,
-                        tint = if (extension.enabled) WeblioCyan else MaterialTheme.colorScheme.onSurfaceVariant
+                    ExtensionLogo(
+                        extension = extension,
+                        size = 28.dp,
+                        modifier = Modifier.testTag("popup_header_ext_logo")
                     )
-                    Spacer(Modifier.width(8.dp))
+                    Spacer(Modifier.width(10.dp))
                     Column(modifier = Modifier.weight(1f)) {
                         Text(
                             text = extension.name,

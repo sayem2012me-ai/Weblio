@@ -12,6 +12,7 @@ import com.example.engine.WeblioDownloadManager
 import com.example.data.db.DownloadFileCategory
 import com.example.data.db.FilterRuleType
 import com.example.ui.BrowserViewModel
+import com.example.ui.components.hasBuiltInExtensionLogo
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotNull
@@ -156,5 +157,39 @@ class WeblioEngineUnitTest {
 
         assertTrue(SearchSuggestionEngine.looksLikeExplicitUrl("https://weblo.app"))
         assertFalse(SearchSuggestionEngine.looksLikeExplicitUrl("weblo browser"))
+    }
+
+    @Test
+    fun `userscript icon url extractor parses https icons and rejects unsafe schemes`() {
+        val scriptWithIcon = """
+            // ==UserScript==
+            // @name    Test Script
+            // @icon64  https://example.com/icon64.png
+            // ==/UserScript==
+        """.trimIndent()
+        assertEquals("https://example.com/icon64.png", ExtensionEngine.resolveUserScriptIconUrl(scriptWithIcon))
+
+        val scriptUnsafe = """
+            // ==UserScript==
+            // @name    Bad Icon Script
+            // @icon    file:///etc/passwd
+            // ==/UserScript==
+        """.trimIndent()
+        assertNull(ExtensionEngine.resolveUserScriptIconUrl(scriptUnsafe))
+
+        listOf(
+            "weblio.darkreader.engine",
+            "weblio.ublock.cosmetic",
+            "weblio.privacy.badger",
+            "weblio.tampermonkey.host",
+            "weblio.bitwarden.bridge",
+            "weblio.cws.sponsorblock",
+            "weblio.cws.translator",
+            "weblio.cws.jsonformatter",
+            "weblio.cws.readermode",
+            "weblio.cws.cookiehider"
+        ).forEach { extId ->
+            assertTrue("Missing built-in logo mapping for $extId", hasBuiltInExtensionLogo(extId))
+        }
     }
 }

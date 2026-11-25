@@ -28,7 +28,6 @@ import androidx.compose.material.icons.filled.CheckCircle
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.Code
 import androidx.compose.material.icons.filled.Delete
-import androidx.compose.material.icons.filled.Extension
 import androidx.compose.material.icons.filled.FileOpen
 import androidx.compose.material.icons.filled.Info
 import androidx.compose.material.icons.filled.OpenInNew
@@ -72,6 +71,7 @@ import com.example.engine.BrowserEngineInfo
 import com.example.engine.SupportLevel
 import com.example.ui.components.ChromeStoreLogoMark
 import com.example.ui.components.EdgeAddonsLogoMark
+import com.example.ui.components.ExtensionLogo
 import com.example.ui.theme.WeblioCyan
 import com.example.ui.theme.WeblioDanger
 import com.example.ui.theme.WeblioElectricBlue
@@ -354,12 +354,12 @@ fun ExtensionsScreen(
                                 ) {
                                     Column(modifier = Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
                                         Row(verticalAlignment = Alignment.CenterVertically) {
-                                            Icon(
-                                                imageVector = Icons.Filled.Extension,
-                                                contentDescription = null,
-                                                tint = if (installedMatch?.enabled == true) WeblioSuccess else WeblioCyan
+                                            ExtensionLogo(
+                                                extension = installedMatch ?: item,
+                                                size = 38.dp,
+                                                dimWhenDisabled = false
                                             )
-                                            Spacer(Modifier.width(10.dp))
+                                            Spacer(Modifier.width(12.dp))
                                             Column(modifier = Modifier.weight(1f)) {
                                                 Text(item.name, style = MaterialTheme.typography.titleMedium)
                                                 Text(
@@ -464,6 +464,13 @@ fun ExtensionsScreen(
         val integrityOk = com.example.engine.ExtensionEngine.verifyExtensionIntegrity(ext)
         AlertDialog(
             onDismissRequest = { inspectExt = null },
+            icon = {
+                ExtensionLogo(
+                    extension = ext,
+                    size = 42.dp,
+                    dimWhenDisabled = false
+                )
+            },
             title = { Text(ext.name) },
             text = {
                 Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
@@ -598,8 +605,12 @@ private fun InstalledExtensionCard(
     ) {
         Column(modifier = Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
             Row(verticalAlignment = Alignment.CenterVertically) {
-                Icon(Icons.Filled.Extension, contentDescription = null, tint = if (ext.enabled) WeblioCyan else MaterialTheme.colorScheme.onSurfaceVariant)
-                Spacer(Modifier.width(10.dp))
+                ExtensionLogo(
+                    extension = ext,
+                    size = 40.dp,
+                    modifier = Modifier.testTag("ext_logo_${ext.id}")
+                )
+                Spacer(Modifier.width(12.dp))
                 Column(modifier = Modifier.weight(1f)) {
                     Text(ext.name, style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold)
                     Text(
@@ -722,12 +733,22 @@ fun ExtensionSecurityReviewDialog(
         onDismissRequest = onKeepDisabled,
         modifier = Modifier.testTag("extension_security_review_dialog"),
         icon = {
-            Icon(
-                imageVector = Icons.Filled.Warning,
-                contentDescription = null,
-                tint = riskColor,
-                modifier = Modifier.size(32.dp)
-            )
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(8.dp)
+            ) {
+                ExtensionLogo(
+                    extension = extension,
+                    size = 36.dp,
+                    dimWhenDisabled = false
+                )
+                Icon(
+                    imageVector = Icons.Filled.Warning,
+                    contentDescription = null,
+                    tint = riskColor,
+                    modifier = Modifier.size(28.dp)
+                )
+            }
         },
         title = {
             Text(

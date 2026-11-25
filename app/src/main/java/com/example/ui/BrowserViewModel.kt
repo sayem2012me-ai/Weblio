@@ -229,6 +229,9 @@ class BrowserViewModel(application: Application) : AndroidViewModel(application)
         File(app.cacheDir, "tab_previews").apply { mkdirs() }
     }
 
+    private val _isStartupReady = MutableStateFlow(false)
+    val isStartupReady: StateFlow<Boolean> = _isStartupReady.asStateFlow()
+
     private val _isAppLocked = MutableStateFlow(false)
     val isAppLocked: StateFlow<Boolean> = _isAppLocked.asStateFlow()
 
@@ -292,73 +295,90 @@ class BrowserViewModel(application: Application) : AndroidViewModel(application)
     private val pendingBlockedDelta = AtomicLong(0L)
     private var blockedFlushJob: Job? = null
     private val lastPreviewCaptureMeta = mutableMapOf<Long, Pair<String, Long>>()
+    private val dispatchedWebViewIdentity = mutableMapOf<Long, Int>()
+    private val webViewCacheGeneration = mutableMapOf<Int, Long>()
+    private val cacheGeneration = AtomicLong(1L)
+    private val tabLastLeftMs = mutableMapOf<Long, Long>()
+    private var lastBackgroundedAtMs: Long = 0L
 
     init {
         viewModelScope.launch {
-            val startup = withContext(Dispatchers.IO) {
-                val defaultProfileId = repo.ensureDefaultsSeeded()
-                if (!prefs.isDefaultBookmarksCleanedOnce()) {
-                    repo.observeProfiles().first().forEach { profile ->
-                        repo.pruneLegacyDefaultBookmarks(profile.id)
+            try {
+                val startup = withContext(Dispatchers.IO) {
+                    val defaultProfileId = repo.ensureDefaultsSeeded()
+                    if (!prefs.isDefaultBookmarksCleanedOnce()) {
+                        repo.observeProfiles().first().forEach { profile ->
+                            repo.pruneLegacyDefaultBookmarks(profile.id)
+                        }
+                        prefs.markDefaultBookmarksCleaned()
                     }
-                    prefs.markDefaultBookmarksCleaned()
-                }
-                val currentSettings = prefs.settingsFlow.first()
-                adBlock.globalEnabled = currentSettings.adBlockerEnabled
-                adBlock.trackerProtectionEnabled = currentSettings.trackerProtectionEnabled
-                adBlock.thirdPartyBlockingEnabled = currentSettings.thirdPartyRequestBlocking
+                    val currentSettings = prefs.settingsFlow.first()
+                    adBlock.globalEnabled = currentSettings.adBlockerEnabled
+                    adBlock.trackerProtectionEnabled = currentSettings.trackerProtectionEnabled
+                    adBlock.thirdPartyBlockingEnabled = currentSettings.thirdPartyRequestBlocking
 
-                val profileId = repo.getProfile(currentSettings.activeProfileId)?.id ?: defaultProfileId
-                if (profileId != currentSettings.activeProfileId) {
-                    prefs.setActiveProfile(profileId)
-                }
+                    val profileId = repo.getProfile(currentSettings.activeProfileId)?.id ?: defaultProfileId
+                    if (profileId != currentSettings.activeProfileId) {
+                        prefs.setActiveProfile(profileId)
+                    }
 
-                var hadIncognitoTabs = false
-                if (currentSettings.clearIncognitoOnExit) {
-                    val beforeTabs = repo.observeTabs(profileId).first()
-                    hadIncognitoTabs = beforeTabs.any { it.isIncognito }
-                    if (hadIncognitoTabs) {
-                        repo.closeAllTabs(profileId, incognitoOnly = true)
-                    }
-                }
-
-                val existingTabs = repo.observeTabs(profileId).first()
-                val initialActiveTabId = when (currentSettings.startupBehavior) {
-                    StartupBehavior.HOME_SCREEN -> {
-                        repo.createTab(profileId, url = "weblio://home", title = "Home")
-                    }
-                    StartupBehavior.CUSTOM_HOMEPAGE -> {
-                        val hp = currentSettings.homepageUrl.ifBlank { "weblio://home" }
-                        repo.createTab(profileId, url = hp, title = if (hp == "weblio://home") "Home" else hp)
-                    }
-                    StartupBehavior.RESTORE_TABS -> {
-                        if (existingTabs.isEmpty()) {
-                            repo.createTab(profileId, url = "weblio://home", title = "Home")
-                        } else {
-                            existingTabs.maxByOrNull { it.lastActiveAt }?.id ?: existingTabs.first().id
+                    var hadIncognitoTabs = false
+                    if (currentSettings.clearIncognitoOnExit) {
+                        val beforeTabs = repo.observeTabs(profileId).first()
+                        hadIncognitoTabs = beforeTabs.any { it.isIncognito }
+                        if (hadIncognitoTabs) {
+                            repo.closeAllTabs(profileId, incognitoOnly = true)
                         }
                     }
-                }
-                Triple(currentSettings, initialActiveTabId, Pair(existingTabs, hadIncognitoTabs))
-            }
 
-            val currentSettings = startup.first
-            if (currentSettings.biometricAppLockEnabled) {
-                _isAppLocked.value = true
-            }
-            _activeTabId.value = startup.second
-            val existingTabs = startup.third.first
-            val hadIncognitoTabs = startup.third.second
-            if (currentSettings.startupBehavior == StartupBehavior.RESTORE_TABS && existingTabs.isNotEmpty()) {
-                loadCachedTabPreviews(existingTabs)
-            }
-            if (hadIncognitoTabs) {
-                // Defer Chromium CookieManager/ProfileStore cleanup until after first frame renders
-                // so cold start SurfaceSyncGroup does not stall loading native Chromium on the UI thread.
-                viewModelScope.launch {
-                    delay(1_500L)
-                    ProfileIsolationManager.clearEphemeralData()
+                    val existingTabs = repo.observeTabs(profileId).first()
+                    val allOpenTabIds = repo.observeProfiles().first()
+                        .flatMap { p -> repo.observeTabs(p.id).first() }
+                        .map { it.id }
+                        .toSet()
+
+                    // Automatically clean stale browser and WebView disk caches on browser open
+                    cleanBrowserDiskCaches(app, allOpenTabIds)
+
+                    val initialActiveTabId = when (currentSettings.startupBehavior) {
+                        StartupBehavior.HOME_SCREEN -> {
+                            repo.createTab(profileId, url = "weblio://home", title = "Home")
+                        }
+                        StartupBehavior.CUSTOM_HOMEPAGE -> {
+                            val hp = currentSettings.homepageUrl.ifBlank { "weblio://home" }
+                            repo.createTab(profileId, url = hp, title = if (hp == "weblio://home") "Home" else hp)
+                        }
+                        StartupBehavior.RESTORE_TABS -> {
+                            if (existingTabs.isEmpty()) {
+                                repo.createTab(profileId, url = "weblio://home", title = "Home")
+                            } else {
+                                existingTabs.maxByOrNull { it.lastActiveAt }?.id ?: existingTabs.first().id
+                            }
+                        }
+                    }
+                    Triple(currentSettings, initialActiveTabId, Pair(existingTabs, hadIncognitoTabs))
                 }
+
+                val currentSettings = startup.first
+                if (currentSettings.biometricAppLockEnabled) {
+                    _isAppLocked.value = true
+                }
+                _activeTabId.value = startup.second
+                val existingTabs = startup.third.first
+                val hadIncognitoTabs = startup.third.second
+                if (currentSettings.startupBehavior == StartupBehavior.RESTORE_TABS && existingTabs.isNotEmpty()) {
+                    loadCachedTabPreviews(existingTabs)
+                }
+                if (hadIncognitoTabs) {
+                    // Defer Chromium CookieManager/ProfileStore cleanup until after first frame renders
+                    // so cold start SurfaceSyncGroup does not stall loading native Chromium on the UI thread.
+                    viewModelScope.launch {
+                        delay(1_500L)
+                        ProfileIsolationManager.clearEphemeralData()
+                    }
+                }
+            } finally {
+                _isStartupReady.value = true
             }
         }
 
@@ -390,9 +410,11 @@ class BrowserViewModel(application: Application) : AndroidViewModel(application)
 
     fun unregisterWebView(tabId: Long) {
         lastDispatchedUrl.remove(tabId)
+        dispatchedWebViewIdentity.remove(tabId)
         lastPreviewCaptureMeta.remove(tabId)
         val wasPlayingMedia = _tabRuntime.value[tabId]?.isMediaPlaying == true
         webViewRegistry.remove(tabId)?.apply {
+            webViewCacheGeneration.remove(System.identityHashCode(this))
             stopLoading()
             webChromeClient = null
             webViewClient = WebViewClient()
@@ -416,12 +438,14 @@ class BrowserViewModel(application: Application) : AndroidViewModel(application)
 
     fun handleRendererProcessGone(tabId: Long, crashedView: WebView?, didCrash: Boolean) {
         if (crashedView == null || webViewRegistry[tabId] === crashedView) {
-            webViewRegistry.remove(tabId)
+            webViewRegistry.remove(tabId)?.let { webViewCacheGeneration.remove(System.identityHashCode(it)) }
         }
         lastDispatchedUrl.remove(tabId)
+        dispatchedWebViewIdentity.remove(tabId)
         val previous = _tabRuntime.value[tabId] ?: TabRuntimeState(tabId = tabId)
         val nextCrashes = previous.rendererCrashCount + 1
-        val canAutoRecover = !didCrash && previous.rendererCrashCount < 2
+        // Always auto-recover when OS reclaimed a background/idle renderer to prevent blank pages
+        val canAutoRecover = !didCrash
         updateRuntimeState(tabId) {
             it.copy(
                 isLoading = false,
@@ -431,30 +455,109 @@ class BrowserViewModel(application: Application) : AndroidViewModel(application)
                 webViewInstanceVersion = it.webViewInstanceVersion + 1,
                 rendererCrashCount = nextCrashes,
                 errorBanner = if (canAutoRecover) null else {
-                    if (didCrash) "Webpage renderer stopped unexpectedly. Tap Reload to restore this tab."
-                    else "Tab paused to save memory. Tap Reload to restore."
+                    "Webpage renderer stopped unexpectedly. Tap Reload to restore this tab."
                 }
             )
         }
     }
 
     fun retryTabLoad(tabId: Long) {
+        recoverStaleTab(tabId, forceRecreateWebView = webViewRegistry[tabId] == null)
+    }
+
+    fun recoverStaleTab(tabId: Long, forceRecreateWebView: Boolean = false) {
         val tab = tabs.value.firstOrNull { it.id == tabId } ?: return
         val targetUrl = (_tabRuntime.value[tabId]?.currentUrl ?: tab.url)
             .takeIf { it.isNotBlank() && it != "weblio://home" } ?: return
         lastDispatchedUrl.remove(tabId)
+        dispatchedWebViewIdentity.remove(tabId)
+        if (forceRecreateWebView) {
+            webViewRegistry.remove(tabId)?.apply {
+                webViewCacheGeneration.remove(System.identityHashCode(this))
+                stopLoading()
+                webChromeClient = null
+                webViewClient = WebViewClient()
+                onPause()
+                (parent as? android.view.ViewGroup)?.removeView(this)
+                removeAllViews()
+                destroy()
+            }
+        }
         val wv = webViewRegistry[tabId]
         updateRuntimeState(tabId) {
             it.copy(
                 errorBanner = null,
                 isLoading = true,
                 progress = 5,
+                rendererCrashCount = 0,
                 webViewInstanceVersion = if (wv == null) it.webViewInstanceVersion + 1 else it.webViewInstanceVersion
             )
         }
         if (wv != null) {
+            runCatching {
+                wv.onResume()
+                wv.resumeTimers()
+                wv.clearCache(true)
+            }
             lastDispatchedUrl[tabId] = targetUrl
+            dispatchedWebViewIdentity[tabId] = System.identityHashCode(wv)
             wv.loadUrl(targetUrl)
+        }
+    }
+
+    fun consumeWebViewCacheClear(webView: WebView): Boolean {
+        val hash = System.identityHashCode(webView)
+        val gen = cacheGeneration.get()
+        if (webViewCacheGeneration[hash] != gen) {
+            webViewCacheGeneration[hash] = gen
+            return true
+        }
+        return false
+    }
+
+    fun onAppBackgrounded() {
+        val now = System.currentTimeMillis()
+        lastBackgroundedAtMs = now
+        activeTab.value?.id?.let { tabLastLeftMs[it] = now }
+        webViewRegistry.forEach { (tabId, wv) ->
+            if (_tabRuntime.value[tabId]?.isMediaPlaying != true) {
+                runCatching { wv.onPause() }
+            }
+        }
+    }
+
+    fun onAppResumed(
+        cacheCleanThresholdMs: Long = AUTO_CACHE_CLEAN_RESUME_MS,
+        staleTabThresholdMs: Long = STALE_TAB_RELOAD_MS
+    ) {
+        webViewRegistry.values.forEach { wv ->
+            runCatching {
+                wv.onResume()
+                wv.resumeTimers()
+            }
+        }
+        val bgAt = lastBackgroundedAtMs
+        if (bgAt <= 0L) return
+        lastBackgroundedAtMs = 0L
+        val elapsed = (System.currentTimeMillis() - bgAt).coerceAtLeast(0L)
+        if (elapsed >= cacheCleanThresholdMs) {
+            cacheGeneration.incrementAndGet()
+            val openIds = tabs.value.map { it.id }.toSet()
+            viewModelScope.launch(Dispatchers.IO) {
+                cleanBrowserDiskCaches(app, openIds)
+            }
+            webViewRegistry.values.forEach { wv ->
+                runCatching { wv.clearCache(true) }
+            }
+        }
+        val active = activeTab.value ?: return
+        val currentUrl = _tabRuntime.value[active.id]?.currentUrl ?: active.url
+        if (currentUrl.isNotBlank() && currentUrl != "weblio://home") {
+            val wv = webViewRegistry[active.id]
+            val surfaceMissing = wv == null || wv.url.isNullOrBlank() || wv.contentHeight == 0
+            if (elapsed >= staleTabThresholdMs || surfaceMissing) {
+                recoverStaleTab(active.id, forceRecreateWebView = wv?.url.isNullOrBlank())
+            }
         }
     }
 
@@ -468,9 +571,14 @@ class BrowserViewModel(application: Application) : AndroidViewModel(application)
 
     fun shouldDispatchInitialLoad(tabId: Long, url: String, webView: WebView): Boolean {
         if (url == "weblio://home" || url.isBlank()) return false
-        if (webView.url == url || webView.originalUrl == url) return false
-        if (lastDispatchedUrl[tabId] == url) return false
+        val currentWvUrl = webView.url
+        val wvHash = System.identityHashCode(webView)
+        if (!currentWvUrl.isNullOrBlank() && (currentWvUrl == url || webView.originalUrl == url)) return false
+        if (!currentWvUrl.isNullOrBlank() && lastDispatchedUrl[tabId] == url && dispatchedWebViewIdentity[tabId] == wvHash) {
+            return false
+        }
         lastDispatchedUrl[tabId] = url
+        dispatchedWebViewIdentity[tabId] = wvHash
         return true
     }
 
@@ -887,10 +995,33 @@ class BrowserViewModel(application: Application) : AndroidViewModel(application)
     }
 
     fun selectTab(tabId: Long) {
+        val now = System.currentTimeMillis()
+        activeTab.value?.id?.takeIf { it != tabId }?.let { prevId ->
+            tabLastLeftMs[prevId] = now
+        }
         _activeTabId.value = tabId
+        val targetTab = tabs.value.firstOrNull { it.id == tabId }
+        val targetUrl = (_tabRuntime.value[tabId]?.currentUrl ?: targetTab?.url).orEmpty()
+        val leftAt = tabLastLeftMs.remove(tabId)
+        if (targetUrl.isNotBlank() && targetUrl != "weblio://home") {
+            val wv = webViewRegistry[tabId]
+            val staleByAge = leftAt != null && (now - leftAt) >= STALE_TAB_RELOAD_MS
+            val surfaceMissing = wv != null && (wv.url.isNullOrBlank() || wv.contentHeight == 0)
+            if (wv == null) {
+                lastDispatchedUrl.remove(tabId)
+                dispatchedWebViewIdentity.remove(tabId)
+            } else if (staleByAge || surfaceMissing) {
+                recoverStaleTab(tabId, forceRecreateWebView = wv.url.isNullOrBlank())
+            } else {
+                runCatching {
+                    wv.onResume()
+                    wv.resumeTimers()
+                }
+            }
+        }
         viewModelScope.launch {
-            tabs.value.firstOrNull { it.id == tabId }?.let {
-                repo.updateTab(it.copy(lastActiveAt = System.currentTimeMillis()))
+            targetTab?.let {
+                repo.updateTab(it.copy(lastActiveAt = now))
             }
         }
     }
@@ -1724,7 +1855,74 @@ class BrowserViewModel(application: Application) : AndroidViewModel(application)
     }
     fun setStartupBehavior(b: StartupBehavior) = viewModelScope.launch { prefs.setStartupBehavior(b) }
     fun setThemeMode(mode: AppThemeMode) = viewModelScope.launch { prefs.setThemeMode(mode) }
-    fun setWallpaperStyle(style: WallpaperStyle) = viewModelScope.launch { prefs.setWallpaperStyle(style) }
+    fun setWallpaperStyle(style: WallpaperStyle) = viewModelScope.launch {
+        withContext(Dispatchers.IO) {
+            val dir = File(app.filesDir, "wallpapers")
+            if (dir.exists()) runCatching { dir.deleteRecursively() }
+        }
+        prefs.setCustomHomeBackgroundPath("")
+        prefs.setWallpaperStyle(style)
+    }
+
+    fun setCustomHomeBackground(uri: Uri) {
+        viewModelScope.launch(Dispatchers.IO) {
+            val wallpapersDir = File(app.filesDir, "wallpapers").apply { mkdirs() }
+            val tempFile = File(wallpapersDir, "pending_${System.currentTimeMillis()}.tmp")
+            val maxBytes = 25L * 1024L * 1024L
+            val savedPath = runCatching {
+                app.contentResolver.openInputStream(uri)?.use { input ->
+                    FileOutputStream(tempFile).use { output ->
+                        val buffer = ByteArray(8192)
+                        var total = 0L
+                        while (true) {
+                            val read = input.read(buffer)
+                            if (read <= 0) break
+                            total += read
+                            if (total > maxBytes) {
+                                error("Image exceeds 25 MB limit")
+                            }
+                            output.write(buffer, 0, read)
+                        }
+                    }
+                } ?: error("Unable to read selected image")
+
+                val opts = BitmapFactory.Options().apply { inJustDecodeBounds = true }
+                BitmapFactory.decodeFile(tempFile.absolutePath, opts)
+                if (opts.outWidth <= 0 || opts.outHeight <= 0) {
+                    error("Unsupported or corrupted image file")
+                }
+
+                val destFile = File(wallpapersDir, "home_bg_${System.currentTimeMillis()}.img")
+                if (!tempFile.renameTo(destFile)) {
+                    tempFile.copyTo(destFile, overwrite = true)
+                    tempFile.delete()
+                }
+                wallpapersDir.listFiles()?.forEach { existing ->
+                    if (existing.absolutePath != destFile.absolutePath) {
+                        existing.delete()
+                    }
+                }
+                destFile.absolutePath
+            }.onFailure {
+                tempFile.delete()
+            }
+
+            savedPath.onSuccess { path ->
+                prefs.setCustomHomeBackgroundPath(path)
+                showMessage("Homepage background updated")
+            }.onFailure { err ->
+                showMessage(err.message ?: "Failed to set homepage background")
+            }
+        }
+    }
+
+    fun clearCustomHomeBackground() {
+        viewModelScope.launch(Dispatchers.IO) {
+            runCatching { File(app.filesDir, "wallpapers").deleteRecursively() }
+            prefs.setCustomHomeBackgroundPath("")
+            showMessage("Homepage background reset")
+        }
+    }
     fun setForceDarkWeb(enabled: Boolean) = viewModelScope.launch { prefs.setForceDarkWeb(enabled) }
     fun setShowQuickLinks(show: Boolean) = viewModelScope.launch { prefs.setShowQuickLinks(show) }
     fun setCompactToolbar(compact: Boolean) = viewModelScope.launch { prefs.setCompactToolbar(compact) }
@@ -1950,6 +2148,64 @@ class BrowserViewModel(application: Application) : AndroidViewModel(application)
         fun computeDisplayedTabCount(tabs: List<TabEntity>, currentTab: TabEntity?): Int {
             val isIncognito = currentTab?.isIncognito == true
             return tabs.count { it.isIncognito == isIncognito }
+        }
+
+        const val AUTO_CACHE_CLEAN_RESUME_MS = 60_000L
+        const val STALE_TAB_RELOAD_MS = 10L * 60_000L
+
+        private val CHROMIUM_CACHE_DIR_NAMES = setOf(
+            "Cache",
+            "Code Cache",
+            "GPUCache",
+            "DawnGraphiteCache",
+            "DawnWebGPUCache",
+            "ShaderCache"
+        )
+
+        fun cleanBrowserDiskCaches(context: android.content.Context, activeTabIds: Set<Long> = emptySet()) {
+            runCatching {
+                context.cacheDir?.listFiles()?.forEach { child ->
+                    if (child.name == "tab_previews") {
+                        if (activeTabIds.isNotEmpty()) {
+                            child.listFiles()?.forEach { preview ->
+                                val id = preview.name.removePrefix("tab_").removeSuffix(".jpg").toLongOrNull()
+                                if (id == null || id !in activeTabIds) {
+                                    preview.delete()
+                                }
+                            }
+                        }
+                    } else {
+                        child.deleteRecursively()
+                    }
+                }
+            }
+            runCatching {
+                context.codeCacheDir?.listFiles()?.forEach { it.deleteRecursively() }
+            }
+            runCatching {
+                val dataRoot = File(context.applicationInfo.dataDir)
+                dataRoot.listFiles()?.forEach { dir ->
+                    if (dir.isDirectory && dir.name.startsWith("app_webview")) {
+                        cleanWebViewProfileCachesRecursively(dir)
+                    }
+                }
+            }
+        }
+
+        private fun cleanWebViewProfileCachesRecursively(dir: File, depth: Int = 0) {
+            if (depth > 3) return
+            dir.listFiles()?.forEach { child ->
+                if (!child.isDirectory) return@forEach
+                when {
+                    child.name in CHROMIUM_CACHE_DIR_NAMES -> child.deleteRecursively()
+                    child.name == "Service Worker" -> {
+                        File(child, "CacheStorage").takeIf { it.exists() }?.deleteRecursively()
+                    }
+                    child.name == "Default" || child.name.startsWith("weblio_") || child.name.startsWith("Profile") -> {
+                        cleanWebViewProfileCachesRecursively(child, depth + 1)
+                    }
+                }
+            }
         }
     }
 }

@@ -15,11 +15,16 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberUpdatedState
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.draw.scale
+import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
@@ -31,21 +36,33 @@ import com.example.ui.theme.WeblioWhite
 import kotlinx.coroutines.delay
 
 @Composable
-fun SplashScreen(onFinished: () -> Unit) {
+fun SplashScreen(
+    isReady: Boolean = true,
+    onFinished: () -> Unit
+) {
     val scale = remember { Animatable(0.86f) }
     val alpha = remember { Animatable(0f) }
+    var animationCompleted by remember { mutableStateOf(false) }
+    val latestOnFinished by rememberUpdatedState(onFinished)
 
     LaunchedEffect(Unit) {
-        scale.animateTo(1f, animationSpec = tween(500, easing = FastOutSlowInEasing))
-        alpha.animateTo(1f, animationSpec = tween(350))
-        delay(550)
-        onFinished()
+        scale.animateTo(1f, animationSpec = tween(420, easing = FastOutSlowInEasing))
+        alpha.animateTo(1f, animationSpec = tween(320))
+        delay(350)
+        animationCompleted = true
+    }
+
+    LaunchedEffect(animationCompleted, isReady) {
+        if (animationCompleted && isReady) {
+            latestOnFinished()
+        }
     }
 
     Box(
         modifier = Modifier
             .fillMaxSize()
-            .background(WeblioGrayBg),
+            .background(WeblioGrayBg)
+            .testTag("splash_screen_root"),
         contentAlignment = Alignment.Center
     ) {
         Column(

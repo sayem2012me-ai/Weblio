@@ -61,7 +61,10 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.Shadow
 import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.font.FontWeight
@@ -69,7 +72,10 @@ import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import coil.compose.AsyncImage
+import coil.request.ImageRequest
 import com.example.R
+import java.io.File
 import com.example.data.db.ProfileEntity
 import com.example.data.db.QuickLinkEntity
 import com.example.data.prefs.BrowserSettings
@@ -126,6 +132,25 @@ fun HomeScreen(
         else -> Brush.verticalGradient(listOf(themeBg, themeBg))
     }
 
+    val customBgFile = remember(settings.customHomeBackgroundPath, isIncognito) {
+        if (!isIncognito && settings.customHomeBackgroundPath.isNotBlank()) {
+            File(settings.customHomeBackgroundPath).takeIf { it.exists() && it.isFile }
+        } else {
+            null
+        }
+    }
+    val hasCustomBg = customBgFile != null
+    val chipSurfaceColor = if (hasCustomBg) {
+        MaterialTheme.colorScheme.surface.copy(alpha = 0.86f)
+    } else {
+        MaterialTheme.colorScheme.surface
+    }
+    val labelShadow = if (hasCustomBg) {
+        Shadow(color = themeBg.copy(alpha = 0.78f), blurRadius = 8f)
+    } else {
+        null
+    }
+
     Box(
         modifier = modifier
             .fillMaxSize()
@@ -133,6 +158,33 @@ fun HomeScreen(
             .background(bgBrush),
         contentAlignment = Alignment.TopCenter
     ) {
+        if (customBgFile != null) {
+            val context = LocalContext.current
+            AsyncImage(
+                model = ImageRequest.Builder(context)
+                    .data(customBgFile)
+                    .crossfade(true)
+                    .build(),
+                contentDescription = "Custom homepage background",
+                contentScale = ContentScale.Crop,
+                modifier = Modifier
+                    .fillMaxSize()
+                    .testTag("home_custom_background_image")
+            )
+            Box(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .background(
+                        Brush.verticalGradient(
+                            listOf(
+                                themeBg.copy(alpha = 0.30f),
+                                themeBg.copy(alpha = 0.42f),
+                                themeBg.copy(alpha = 0.60f)
+                            )
+                        )
+                    )
+            )
+        }
         Column(
             modifier = Modifier
                 .widthIn(max = 620.dp)
@@ -149,7 +201,7 @@ fun HomeScreen(
             ) {
                 Surface(
                     shape = RoundedCornerShape(18.dp),
-                    color = MaterialTheme.colorScheme.surface,
+                    color = chipSurfaceColor,
                     modifier = Modifier
                         .clip(RoundedCornerShape(18.dp))
                         .clickable(onClick = onProfileClick)
@@ -180,7 +232,7 @@ fun HomeScreen(
 
                 Surface(
                     shape = RoundedCornerShape(18.dp),
-                    color = MaterialTheme.colorScheme.surface,
+                    color = chipSurfaceColor,
                     modifier = Modifier
                         .clip(RoundedCornerShape(18.dp))
                         .clickable(onClick = onAdBlockClick)
@@ -219,7 +271,8 @@ fun HomeScreen(
                     text = if (isIncognito) "Weblo Private" else "Weblo",
                     style = MaterialTheme.typography.headlineLarge.copy(
                         letterSpacing = 1.5.sp,
-                        fontWeight = FontWeight.Bold
+                        fontWeight = FontWeight.Bold,
+                        shadow = labelShadow
                     ),
                     color = if (isIncognito) WeblioIncognitoAccent else MaterialTheme.colorScheme.onBackground
                 )
@@ -227,7 +280,10 @@ fun HomeScreen(
             Spacer(modifier = Modifier.height(6.dp))
             Text(
                 text = stringResource(id = R.string.tagline),
-                style = MaterialTheme.typography.labelSmall.copy(letterSpacing = 1.8.sp),
+                style = MaterialTheme.typography.labelSmall.copy(
+                    letterSpacing = 1.8.sp,
+                    shadow = labelShadow
+                ),
                 color = if (isIncognito) WeblioIncognitoAccent.copy(alpha = 0.75f) else MaterialTheme.colorScheme.onSurfaceVariant
             )
 
@@ -349,6 +405,7 @@ fun HomeScreen(
                         icon = Icons.Filled.Bookmarks,
                         circleColor = Color(0xFF6B77F8),
                         iconTint = Color.White,
+                        labelShadow = labelShadow,
                         onClick = onBookmarksClick
                     )
                     CircularShortcutTile(
@@ -356,12 +413,14 @@ fun HomeScreen(
                         icon = Icons.Filled.History,
                         circleColor = Color(0xFFEAEAEA),
                         iconTint = Color(0xFF242424),
+                        labelShadow = labelShadow,
                         onClick = onHistoryClick
                     )
                     quickLinks.forEach { link ->
                         QuickLinkCircularTile(
                             link = link,
                             editMode = editingQuickLinks,
+                            labelShadow = labelShadow,
                             onClick = { onNavigateUrl(link.url) },
                             onLongClick = { editingQuickLinks = !editingQuickLinks },
                             onDelete = { onDeleteQuickLink(link) }
@@ -372,6 +431,7 @@ fun HomeScreen(
                         icon = Icons.Filled.Add,
                         circleColor = MaterialTheme.colorScheme.surfaceVariant,
                         iconTint = MaterialTheme.colorScheme.onSurface,
+                        labelShadow = labelShadow,
                         onClick = { showAddShortcutDialog = true }
                     )
                 }
@@ -419,6 +479,7 @@ private fun CircularShortcutTile(
     icon: ImageVector,
     circleColor: Color,
     iconTint: Color,
+    labelShadow: Shadow? = null,
     onClick: () -> Unit
 ) {
     Column(
@@ -441,7 +502,7 @@ private fun CircularShortcutTile(
         Spacer(Modifier.height(7.dp))
         Text(
             text = title,
-            style = MaterialTheme.typography.bodySmall,
+            style = MaterialTheme.typography.bodySmall.copy(shadow = labelShadow),
             color = MaterialTheme.colorScheme.onBackground,
             maxLines = 1,
             overflow = TextOverflow.Ellipsis,
@@ -455,6 +516,7 @@ private fun CircularShortcutTile(
 private fun QuickLinkCircularTile(
     link: QuickLinkEntity,
     editMode: Boolean,
+    labelShadow: Shadow? = null,
     onClick: () -> Unit,
     onLongClick: () -> Unit,
     onDelete: () -> Unit
@@ -499,7 +561,7 @@ private fun QuickLinkCircularTile(
             Spacer(Modifier.height(7.dp))
             Text(
                 text = link.title,
-                style = MaterialTheme.typography.bodySmall,
+                style = MaterialTheme.typography.bodySmall.copy(shadow = labelShadow),
                 color = MaterialTheme.colorScheme.onBackground,
                 maxLines = 1,
                 overflow = TextOverflow.Ellipsis,

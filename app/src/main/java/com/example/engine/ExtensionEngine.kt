@@ -1282,5 +1282,82 @@ class ExtensionEngine(
                 if (target.path.startsWith(rootPrefix)) target else null
             }.getOrNull()
         }
+
+        private val RASTER_ICON_EXTS = setOf("png", "webp", "jpg", "jpeg", "gif", "bmp", "ico")
+
+        /**
+         * Resolves the highest-resolution raster icon declared in an unpacked WebExtension's manifest.json
+         * (`icons`, `action.default_icon`, or `browser_action.default_icon`), enforcing path confinement.
+         */
+        fun resolveExtensionIconFile(installPath: String): File? {
+            if (installPath.isBlank()) return null
+            return runCatching {
+                val rootDir = File(installPath)
+                if (!rootDir.exists() || !rootDir.isDirectory) return@runCatching null
+                val manifestFile = resolveConfinedFile(rootDir, "manifest.json") ?: return@runCatching null
+                if (!manifestFile.exists() || !manifestFile.isFile) return@runCatching null
+
+                val manifest = JSONObject(manifestFile.readText())
+                val candidates = mutableListOf<Pair<Int, String>>()
+
+                fun collectIconMap(obj: JSONObject?) {
+                    if (obj == null) return
+                    val keys = obj.keys()
+                    while (keys.hasNext()) {
+                        val key = keys.next()
+                        val rel = obj.optString(key, "").trim()
+                        if (rel.isNotBlank()) {
+                            candidates.add((key.toIntOrNull() ?: 0) to rel)
+                        }
+                    }
+                }
+
+                fun collectActionIcon(actionObj: JSONObject?) {
+                    if (actionObj == null) return
+                    when (val raw = actionObj.opt("default_icon")) {
+                        is JSONObject -> collectIconMap(raw)
+                        is String -> if (raw.isNotBlank()) candidates.add(48 to raw.trim())
+                    }
+                }
+
+                collectIconMap(manifest.optJSONObject("icons"))
+                collectActionIcon(manifest.optJSONObject("action"))
+                collectActionIcon(manifest.optJSONObject("browser_action"))
+
+                val maxIconBytes = 4L * 1024L * 1024L
+                val ordered = candidates.sortedByDescending { (size, _) -> size }
+                for ((_, relPath) in ordered) {
+                    val file = resolveConfinedFile(rootDir, relPath) ?: continue
+                    val ext = file.extension.lowercase()
+                    if (ext in RASTER_ICON_EXTS && file.exists() && file.isFile && file.length() in 1L..maxIconBytes) {
+                        return@runCatching file
+                    }
+                }
+                null
+            }.getOrNull()
+        }
+
+        /**
+         * Extracts a safe http(s) icon URL from Tampermonkey-style `==UserScript==` metadata.
+         */
+        fun resolveUserScriptIconUrl(scriptContent: String): String? {
+            if (scriptContent.isBlank()) return null
+            val meta = parseUserScriptMetadata(scriptContent)
+            val keys = listOf("icon64", "icon64url", "icon", "iconurl", "defaulticon")
+            for (k in keys) {
+                val values = meta[k].orEmpty()
+                for (raw in values) {
+                    val candidate = raw.trim()
+                    if (candidate.length in 10..1024 &&
+                        !candidate.any { it.isWhitespace() } &&
+                        (candidate.startsWith("https://", ignoreCase = true) ||
+                            candidate.startsWith("http://", ignoreCase = true))
+                    ) {
+                        return candidate
+                    }
+                }
+            }
+            return null
+        }
     }
 }

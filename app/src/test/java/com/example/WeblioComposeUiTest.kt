@@ -2,11 +2,13 @@ package com.example
 
 import android.graphics.Bitmap
 import androidx.compose.ui.test.assertIsDisplayed
+import androidx.compose.ui.test.hasTestTag
 import androidx.compose.ui.test.junit4.createComposeRule
 import androidx.compose.ui.test.onNodeWithTag
 import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.test.performClick
 import androidx.compose.ui.test.performScrollTo
+import androidx.compose.ui.test.performScrollToNode
 import androidx.compose.ui.test.performTextInput
 import androidx.compose.ui.test.assertTextContains
 import com.example.data.db.DownloadEntity
@@ -30,11 +32,18 @@ import com.example.ui.screens.ExtensionsScreen
 import com.example.ui.screens.HomeScreen
 import com.example.ui.screens.MainMenuBottomSheet
 import com.example.ui.screens.SearchScreen
+import com.example.ui.screens.SettingsScreen
+import com.example.ui.screens.SplashScreen
 import com.example.ui.screens.TabsScreen
 import com.example.ui.theme.AppThemeMode
 import com.example.ui.theme.WeblioGrayBg
 import com.example.ui.theme.WeblioLightBg
 import com.example.ui.theme.WeblioTheme
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.setValue
+import androidx.test.core.app.ApplicationProvider
+import java.io.File
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
 import org.junit.Rule
@@ -368,6 +377,7 @@ class WeblioComposeUiTest {
 
         composeRule.waitForIdle()
         composeRule.onNodeWithText("Dark Reader").assertIsDisplayed()
+        composeRule.onNodeWithTag("popup_ext_logo_7", useUnmergedTree = true).assertIsDisplayed()
         composeRule.onNodeWithText("Chrome Web Store").assertIsDisplayed()
         composeRule.onNodeWithText("Microsoft Edge Add-ons").assertIsDisplayed()
 
@@ -587,9 +597,48 @@ class WeblioComposeUiTest {
         }
 
         composeRule.waitForIdle()
+        composeRule.onNodeWithTag("popup_header_ext_logo").assertIsDisplayed()
         composeRule.onNodeWithTag("popup_dialog_enable_btn").assertIsDisplayed().performClick()
         composeRule.waitForIdle()
         assertEquals(1, toggledCount)
+    }
+
+    @Test
+    fun extensionsScreen_installedTabDisplaysExtensionLogos() {
+        val installed = listOf(
+            ExtensionEntity(
+                id = 12L,
+                profileId = 1L,
+                extId = "weblio.ublock.cosmetic",
+                name = "uBlock Cosmetic & Scriptlets",
+                version = "1.61.0",
+                description = "Blocks residual ad containers",
+                sourceType = "BUILTIN_ENGINE",
+                enabled = true
+            )
+        )
+
+        composeRule.setContent {
+            WeblioTheme {
+                ExtensionsScreen(
+                    installedExtensions = installed,
+                    builtInCatalog = emptyList(),
+                    onToggleExtension = {},
+                    onRemoveExtension = {},
+                    onOpenPopup = {},
+                    onInstallFromUri = { _, _ -> },
+                    onInstallBuiltIn = {},
+                    onCreateUserScript = { _, _ -> },
+                    onBack = {}
+                )
+            }
+        }
+
+        composeRule.waitForIdle()
+        composeRule.onNodeWithText("Installed (1)").performClick()
+        composeRule.waitForIdle()
+        composeRule.onNodeWithTag("ext_logo_12").performScrollTo().assertIsDisplayed()
+        composeRule.onNodeWithText("uBlock Cosmetic & Scriptlets").performScrollTo().assertIsDisplayed()
     }
 
     @Test
@@ -688,5 +737,146 @@ class WeblioComposeUiTest {
         composeRule.onNodeWithTag("search_clear_close_button").performClick()
         composeRule.waitForIdle()
         assertTrue(backCalled)
+    }
+
+    @Test
+    fun homeScreen_rendersCustomBackgroundOnlyInNormalMode() {
+        val tempImg = File.createTempFile("weblo_home_bg_", ".png")
+        val bmp = Bitmap.createBitmap(16, 16, Bitmap.Config.ARGB_8888)
+        tempImg.outputStream().use { bmp.compress(Bitmap.CompressFormat.PNG, 100, it) }
+
+        try {
+            composeRule.setContent {
+                WeblioTheme {
+                    HomeScreen(
+                        settings = BrowserSettings(customHomeBackgroundPath = tempImg.absolutePath),
+                        activeProfile = ProfileEntity(id = 1, name = "Personal", iconKey = "person"),
+                        quickLinks = emptyList(),
+                        isIncognito = false,
+                        sessionBlockedCount = 0L,
+                        onNavigateUrl = {},
+                        onSelectSearchEngine = {},
+                        onQrClick = {},
+                        onVoiceClick = {},
+                        onExtensionsClick = {},
+                        onBookmarksClick = {},
+                        onHistoryClick = {},
+                        onAdBlockClick = {},
+                        onProfileClick = {},
+                        onAddQuickLink = { _, _ -> },
+                        onDeleteQuickLink = {}
+                    )
+                }
+            }
+            composeRule.waitForIdle()
+            composeRule.onNodeWithTag("home_custom_background_image").assertIsDisplayed()
+        } finally {
+            tempImg.delete()
+        }
+    }
+
+    @Test
+    fun homeScreen_hidesCustomBackgroundInIncognitoMode() {
+        val tempImg = File.createTempFile("weblo_incog_bg_", ".png")
+        val bmp = Bitmap.createBitmap(16, 16, Bitmap.Config.ARGB_8888)
+        tempImg.outputStream().use { bmp.compress(Bitmap.CompressFormat.PNG, 100, it) }
+
+        try {
+            composeRule.setContent {
+                WeblioTheme {
+                    HomeScreen(
+                        settings = BrowserSettings(customHomeBackgroundPath = tempImg.absolutePath),
+                        activeProfile = ProfileEntity(id = 1, name = "Personal", iconKey = "person"),
+                        quickLinks = emptyList(),
+                        isIncognito = true,
+                        sessionBlockedCount = 0L,
+                        onNavigateUrl = {},
+                        onSelectSearchEngine = {},
+                        onQrClick = {},
+                        onVoiceClick = {},
+                        onExtensionsClick = {},
+                        onBookmarksClick = {},
+                        onHistoryClick = {},
+                        onAdBlockClick = {},
+                        onProfileClick = {},
+                        onAddQuickLink = { _, _ -> },
+                        onDeleteQuickLink = {}
+                    )
+                }
+            }
+            composeRule.waitForIdle()
+            composeRule.onNodeWithTag("home_custom_background_image").assertDoesNotExist()
+        } finally {
+            tempImg.delete()
+        }
+    }
+
+    @Test
+    fun settingsScreen_showsCustomBackgroundControlsAndPreviewWhenSet() {
+        val app = ApplicationProvider.getApplicationContext<WeblioApplication>()
+        val vmStore = androidx.lifecycle.ViewModelStore()
+        val vm = androidx.lifecycle.ViewModelProvider(
+            vmStore,
+            androidx.lifecycle.ViewModelProvider.AndroidViewModelFactory.getInstance(app)
+        )[BrowserViewModel::class.java]
+        val tempImg = File.createTempFile("weblo_settings_bg_", ".png")
+        val bmp = Bitmap.createBitmap(16, 16, Bitmap.Config.ARGB_8888)
+        tempImg.outputStream().use { bmp.compress(Bitmap.CompressFormat.PNG, 100, it) }
+
+        try {
+            composeRule.setContent {
+                WeblioTheme {
+                    SettingsScreen(
+                        settings = BrowserSettings(customHomeBackgroundPath = tempImg.absolutePath),
+                        viewModel = vm,
+                        onOpenExtensions = {},
+                        onOpenAdBlock = {},
+                        onOpenPasswords = {},
+                        onOpenSitePermissions = {},
+                        onOpenBackupRestore = {},
+                        onBack = {}
+                    )
+                }
+            }
+            composeRule.waitForIdle()
+            composeRule.onNodeWithTag("settings_list")
+                .performScrollToNode(hasTestTag("settings_custom_home_bg_preview"))
+            composeRule.onNodeWithTag("settings_custom_home_bg_preview").assertIsDisplayed()
+            composeRule.onNodeWithTag("settings_list")
+                .performScrollToNode(hasTestTag("settings_pick_home_bg_button"))
+            composeRule.onNodeWithTag("settings_pick_home_bg_button").assertIsDisplayed()
+            composeRule.onNodeWithTag("settings_list")
+                .performScrollToNode(hasTestTag("settings_clear_home_bg_button"))
+            composeRule.onNodeWithTag("settings_clear_home_bg_button").assertIsDisplayed()
+        } finally {
+            vmStore.clear()
+            tempImg.delete()
+        }
+    }
+
+    @Test
+    fun splashScreen_holdsUntilStartupReadyAndShowsOriginalBrandingWithoutIcon() {
+        var ready by mutableStateOf(false)
+        var finished = false
+
+        composeRule.setContent {
+            WeblioTheme {
+                SplashScreen(
+                    isReady = ready,
+                    onFinished = { finished = true }
+                )
+            }
+        }
+
+        composeRule.mainClock.advanceTimeBy(2000L)
+        composeRule.waitForIdle()
+        composeRule.onNodeWithTag("splash_screen_root").assertIsDisplayed()
+        composeRule.onNodeWithText("Weblo").assertIsDisplayed()
+        composeRule.onNodeWithText("EXPLORE. DISCOVER. EXPERIENCE.").assertIsDisplayed()
+        assertEquals(false, finished)
+
+        ready = true
+        composeRule.waitForIdle()
+        assertTrue(finished)
     }
 }

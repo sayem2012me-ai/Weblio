@@ -19,6 +19,9 @@ import androidx.activity.result.contract.ActivityResultContracts
 import androidx.activity.viewModels
 import androidx.biometric.BiometricManager
 import androidx.biometric.BiometricPrompt
+import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.core.tween
+import androidx.compose.animation.fadeOut
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -58,6 +61,7 @@ import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -81,7 +85,9 @@ import com.example.engine.ExtensionEngine
 import com.example.engine.WeblioDnsVpnService
 import com.example.security.SecurityState
 import com.example.ui.BrowserViewModel
+import com.example.ui.components.ChromeStoreLogoMark
 import com.example.ui.components.DownloadConfirmDialog
+import com.example.ui.components.EdgeAddonsLogoMark
 import com.example.ui.components.ExtensionPopupDialog
 import com.example.ui.components.FindInPageBar
 import com.example.ui.components.PinUnlockDialog
@@ -167,6 +173,18 @@ class MainActivity : FragmentActivity() {
                     )
                 }
             }
+        }
+    }
+
+    override fun onStart() {
+        super.onStart()
+        viewModel.onAppResumed()
+    }
+
+    override fun onStop() {
+        super.onStop()
+        if (!isChangingConfigurations) {
+            viewModel.onAppBackgrounded()
         }
     }
 
@@ -348,19 +366,24 @@ private fun WeblioAppRoot(
         }
     }
 
-    NavHost(
-        navController = navController,
-        startDestination = WeblioRoute.Browser
-    ) {
-        composable<WeblioRoute.Splash> {
-            SplashScreen(
-                onFinished = {
-                    navController.navigate(WeblioRoute.Browser) {
-                        popUpTo(WeblioRoute.Splash) { inclusive = true }
+    val isStartupReady by viewModel.isStartupReady.collectAsState()
+    var splashDismissed by rememberSaveable { mutableStateOf(false) }
+
+    Box(modifier = Modifier.fillMaxSize()) {
+        NavHost(
+            navController = navController,
+            startDestination = WeblioRoute.Browser
+        ) {
+            composable<WeblioRoute.Splash> {
+                SplashScreen(
+                    isReady = isStartupReady,
+                    onFinished = {
+                        navController.navigate(WeblioRoute.Browser) {
+                            popUpTo(WeblioRoute.Splash) { inclusive = true }
+                        }
                     }
-                }
-            )
-        }
+                )
+            }
 
         composable<WeblioRoute.Browser> {
             val currentTab = activeTab
@@ -549,6 +572,12 @@ private fun WeblioAppRoot(
                                                 .padding(horizontal = 14.dp, vertical = 8.dp),
                                             verticalAlignment = Alignment.CenterVertically
                                         ) {
+                                            if (storeExtRef.storeName.contains("Edge", ignoreCase = true)) {
+                                                EdgeAddonsLogoMark(size = 24.dp)
+                                            } else {
+                                                ChromeStoreLogoMark(size = 24.dp)
+                                            }
+                                            Spacer(Modifier.width(10.dp))
                                             Column(modifier = Modifier.weight(1f)) {
                                                 Text(
                                                     text = runtime?.title?.takeIf { it.isNotBlank() } ?: storeExtRef.storeName,
@@ -1088,5 +1117,16 @@ private fun WeblioAppRoot(
                 TextButton(onClick = { showCwsCompatibilityDialog = false }) { Text("Dismiss") }
             }
         )
+    }
+
+        AnimatedVisibility(
+            visible = !splashDismissed,
+            exit = fadeOut(animationSpec = tween(260))
+        ) {
+            SplashScreen(
+                isReady = isStartupReady,
+                onFinished = { splashDismissed = true }
+            )
+        }
     }
 }
