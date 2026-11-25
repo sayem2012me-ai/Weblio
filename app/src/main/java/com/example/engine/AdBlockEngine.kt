@@ -22,7 +22,9 @@ import okhttp3.Request
 import okhttp3.RequestBody.Companion.toRequestBody
 import java.io.ByteArrayInputStream
 import java.util.concurrent.ConcurrentHashMap
+import java.util.concurrent.ConcurrentLinkedDeque
 import java.util.concurrent.TimeUnit
+import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicLong
 
 data class BlockedEvent(
@@ -58,6 +60,9 @@ class AdBlockEngine(private val repository: WeblioRepository) {
     private var snapshot = RuleSnapshot(signature = 0)
 
     private val pendingRuleHits = ConcurrentHashMap<Long, AtomicLong>()
+    private val pendingUiBlockedCount = AtomicLong(0L)
+    private val pendingRecentEvents = ConcurrentLinkedDeque<BlockedEvent>()
+    private val uiFlushScheduled = AtomicBoolean(false)
 
     private val _recentBlocked = MutableStateFlow<List<BlockedEvent>>(emptyList())
     val recentBlocked: StateFlow<List<BlockedEvent>> = _recentBlocked.asStateFlow()
@@ -326,17 +331,17 @@ class AdBlockEngine(private val repository: WeblioRepository) {
      */
     fun cleanTrackingUrl(rawUrl: String): String {
         if (!trackerProtectionEnabled) return rawUrl
+        val qIdx = rawUrl.indexOf('?')
+        if (qIdx < 0) return rawUrl
+        val queryPart = rawUrl.substring(qIdx + 1).lowercase()
+        if (TRACKING_KEYS.none { queryPart.contains("$it=") }) return rawUrl
         val uri = runCatching { Uri.parse(rawUrl) }.getOrNull() ?: return rawUrl
         if (uri.scheme != "http" && uri.scheme != "https") return rawUrl
-        val trackingKeys = setOf(
-            "utm_source", "utm_medium", "utm_campaign", "utm_term", "utm_content",
-            "fbclid", "gclid", "mc_cid", "mc_eid", "igshid", "yclid"
-        )
         val names = uri.queryParameterNames
-        if (names.none { it.lowercase() in trackingKeys }) return rawUrl
+        if (names.none { it.lowercase() in TRACKING_KEYS }) return rawUrl
         val builder = uri.buildUpon().clearQuery()
         for (name in names) {
-            if (name.lowercase() !in trackingKeys) {
+            if (name.lowercase() !in TRACKING_KEYS) {
                 uri.getQueryParameters(name).forEach { value ->
                     builder.appendQueryParameter(name, value)
                 }
@@ -364,10 +369,37 @@ class AdBlockEngine(private val repository: WeblioRepository) {
     }
 
     private fun recordBlocked(event: BlockedEvent, ruleId: Long?) {
-        _sessionBlockedCount.update { it + 1 }
-        _recentBlocked.update { list -> (listOf(event) + list).take(60) }
+        pendingUiBlockedCount.incrementAndGet()
+        pendingRecentEvents.addFirst(event)
+        while (pendingRecentEvents.size > 60) {
+            pendingRecentEvents.pollLast()
+        }
         if (ruleId != null) {
             pendingRuleHits.computeIfAbsent(ruleId) { AtomicLong(0L) }.incrementAndGet()
+        }
+        if (uiFlushScheduled.compareAndSet(false, true)) {
+            scope.launch {
+                delay(350L)
+                flushUiBlockedStats()
+            }
+        }
+    }
+
+    private fun flushUiBlockedStats() {
+        uiFlushScheduled.set(false)
+        val delta = pendingUiBlockedCount.getAndSet(0L)
+        if (delta > 0L) {
+            _sessionBlockedCount.update { it + delta }
+        }
+        if (pendingRecentEvents.isNotEmpty()) {
+            val fresh = ArrayList<BlockedEvent>(60)
+            while (fresh.size < 60) {
+                val item = pendingRecentEvents.pollFirst() ?: break
+                fresh.add(item)
+            }
+            if (fresh.isNotEmpty()) {
+                _recentBlocked.update { prev -> (fresh + prev).take(60) }
+            }
         }
     }
 
@@ -377,12 +409,18 @@ class AdBlockEngine(private val repository: WeblioRepository) {
             "UTF-8",
             204,
             "Blocked by Weblo Shield",
-            mapOf("X-Weblio-Blocked" to "true"),
-            ByteArrayInputStream(ByteArray(0))
+            BLOCKED_HEADERS,
+            ByteArrayInputStream(EMPTY_BYTES)
         )
     }
 
     companion object {
+        private val EMPTY_BYTES = ByteArray(0)
+        private val BLOCKED_HEADERS = mapOf("X-Weblio-Blocked" to "true")
+        private val TRACKING_KEYS = setOf(
+            "utm_source", "utm_medium", "utm_campaign", "utm_term", "utm_content",
+            "fbclid", "gclid", "mc_cid", "mc_eid", "igshid", "yclid"
+        )
         private fun isSafeCosmeticSelector(sel: String): Boolean {
             return sel.isNotBlank() &&
                 sel.length <= 240 &&

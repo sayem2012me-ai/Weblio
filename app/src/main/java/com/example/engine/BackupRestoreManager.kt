@@ -40,70 +40,73 @@ class BackupRestoreManager(
             val quickLinks = repository.observeQuickLinks(profileId).first()
             val customRules = repository.observeAdBlockRules().first()
                 .filter { it.sourceList == "Custom User Rules" }
+            val passwords = if (includePasswords) {
+                repository.observePasswords(profileId).first().mapNotNull { p ->
+                    repository.decryptPassword(p)?.let { plain -> Triple(p.originHost, p.username, plain) }
+                }
+            } else emptyList()
 
-            val payload = JSONObject().apply {
-                put("schemaVersion", BACKUP_SCHEMA_VERSION)
-                put("createdAt", System.currentTimeMillis())
-                put("settings", JSONObject().apply {
-                    put("searchEngine", settings.defaultSearchEngine.name)
-                    put("homepageUrl", settings.homepageUrl)
-                    put("themeMode", settings.themeMode.name)
-                    put("adBlockerEnabled", settings.adBlockerEnabled)
-                    put("trackerProtectionEnabled", settings.trackerProtectionEnabled)
-                    put("dnsFilterMode", settings.dnsFilterMode.name)
-                    put("customDohUrl", settings.customDohUrl)
-                })
-                put("bookmarks", JSONArray().apply {
-                    bookmarks.forEach { bm ->
-                        put(JSONObject().apply {
-                            put("title", bm.title)
-                            put("url", bm.url)
-                            put("folder", bm.folder)
-                        })
-                    }
-                })
-                put("quickLinks", JSONArray().apply {
-                    quickLinks.forEach { ql ->
-                        put(JSONObject().apply {
-                            put("title", ql.title)
-                            put("url", ql.url)
-                            put("iconKey", ql.iconKey)
-                        })
-                    }
-                })
-                put("customRules", JSONArray().apply {
-                    customRules.forEach { r ->
-                        put(JSONObject().apply {
-                            put("pattern", r.pattern)
-                            put("ruleType", r.ruleType)
-                        })
-                    }
-                })
-                if (includePasswords) {
-                    val passwords = repository.observePasswords(profileId).first()
-                    put("passwords", JSONArray().apply {
-                        passwords.forEach { p ->
-                            val plain = repository.decryptPassword(p)
-                            if (plain != null) {
+            kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.Default) {
+                val payload = JSONObject().apply {
+                    put("schemaVersion", BACKUP_SCHEMA_VERSION)
+                    put("createdAt", System.currentTimeMillis())
+                    put("settings", JSONObject().apply {
+                        put("searchEngine", settings.defaultSearchEngine.name)
+                        put("homepageUrl", settings.homepageUrl)
+                        put("themeMode", settings.themeMode.name)
+                        put("adBlockerEnabled", settings.adBlockerEnabled)
+                        put("trackerProtectionEnabled", settings.trackerProtectionEnabled)
+                        put("dnsFilterMode", settings.dnsFilterMode.name)
+                        put("customDohUrl", settings.customDohUrl)
+                    })
+                    put("bookmarks", JSONArray().apply {
+                        bookmarks.forEach { bm ->
+                            put(JSONObject().apply {
+                                put("title", bm.title)
+                                put("url", bm.url)
+                                put("folder", bm.folder)
+                            })
+                        }
+                    })
+                    put("quickLinks", JSONArray().apply {
+                        quickLinks.forEach { ql ->
+                            put(JSONObject().apply {
+                                put("title", ql.title)
+                                put("url", ql.url)
+                                put("iconKey", ql.iconKey)
+                            })
+                        }
+                    })
+                    put("customRules", JSONArray().apply {
+                        customRules.forEach { r ->
+                            put(JSONObject().apply {
+                                put("pattern", r.pattern)
+                                put("ruleType", r.ruleType)
+                            })
+                        }
+                    })
+                    if (includePasswords) {
+                        put("passwords", JSONArray().apply {
+                            passwords.forEach { (host, user, plain) ->
                                 put(JSONObject().apply {
-                                    put("host", p.originHost)
-                                    put("username", p.username)
+                                    put("host", host)
+                                    put("username", user)
                                     put("secret", plain) // Encrypted inside outer AES-GCM envelope
                                 })
                             }
-                        }
-                    })
+                        })
+                    }
                 }
-            }
 
-            val (cipher, salt, iv) = KeystoreCryptoManager.encryptWithPassphrase(payload.toString(), passphrase)
-            JSONObject().apply {
-                put("format", MAGIC_FORMAT)
-                put("version", BACKUP_SCHEMA_VERSION)
-                put("salt", salt)
-                put("iv", iv)
-                put("cipherText", cipher)
-            }.toString(2)
+                val (cipher, salt, iv) = KeystoreCryptoManager.encryptWithPassphrase(payload.toString(), passphrase)
+                JSONObject().apply {
+                    put("format", MAGIC_FORMAT)
+                    put("version", BACKUP_SCHEMA_VERSION)
+                    put("salt", salt)
+                    put("iv", iv)
+                    put("cipherText", cipher)
+                }.toString(2)
+            }
         }
     }
 
@@ -112,49 +115,66 @@ class BackupRestoreManager(
         rawEnvelope: String,
         passphrase: String
     ): RestoreResult {
-        return runCatching {
-            val env = JSONObject(rawEnvelope)
-            if (env.optString("format") != MAGIC_FORMAT) {
-                return RestoreResult.Error("Unrecognized backup file format.")
-            }
-            val version = env.optInt("version", -1)
-            if (version < 1 || version > BACKUP_SCHEMA_VERSION) {
-                return RestoreResult.Error("Incompatible backup version ($version).")
-            }
-
-            val decryptedJson = KeystoreCryptoManager.decryptWithPassphrase(
-                cipherTextBase64 = env.getString("cipherText"),
-                saltBase64 = env.getString("salt"),
-                ivBase64 = env.getString("iv"),
-                passphrase = passphrase
-            )
-            val data = JSONObject(decryptedJson)
-            if (data.optInt("schemaVersion") != version) {
-                return RestoreResult.Error("Backup integrity verification failed.")
-            }
-
-            data.optJSONObject("settings")?.let { s ->
-                runCatching { preferences.setSearchEngine(com.example.data.prefs.SearchEngine.valueOf(s.getString("searchEngine"))) }
-                if (s.has("homepageUrl")) {
-                    val hp = s.getString("homepageUrl").trim()
-                    if (hp == "weblio://home" || hp.startsWith("https://", true) || hp.startsWith("http://", true)) {
-                        preferences.setHomepage(hp)
-                    }
+        return try {
+            val data = kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.Default) {
+                val env = JSONObject(rawEnvelope)
+                if (env.optString("format") != MAGIC_FORMAT) {
+                    return@withContext null to RestoreResult.Error("Unrecognized backup file format.")
                 }
-                runCatching { preferences.setThemeMode(com.example.ui.theme.AppThemeMode.valueOf(s.getString("themeMode"))) }
-                if (s.has("adBlockerEnabled")) preferences.setAdBlockerEnabled(s.getBoolean("adBlockerEnabled"))
-                if (s.has("trackerProtectionEnabled")) preferences.setTrackerProtection(s.getBoolean("trackerProtectionEnabled"))
-                runCatching { preferences.setDnsFilterMode(com.example.data.prefs.DnsFilterMode.valueOf(s.getString("dnsFilterMode"))) }
-                if (s.has("customDohUrl")) {
-                    val doh = s.getString("customDohUrl").trim()
-                    if (doh.isEmpty() || doh.startsWith("https://", true)) {
-                        preferences.setCustomDohUrl(doh)
-                    }
+                val version = env.optInt("version", -1)
+                if (version < 1 || version > BACKUP_SCHEMA_VERSION) {
+                    return@withContext null to RestoreResult.Error("Incompatible backup version ($version).")
                 }
+
+                val decryptedJson = KeystoreCryptoManager.decryptWithPassphrase(
+                    cipherTextBase64 = env.getString("cipherText"),
+                    saltBase64 = env.getString("salt"),
+                    ivBase64 = env.getString("iv"),
+                    passphrase = passphrase
+                )
+                val parsed = JSONObject(decryptedJson)
+                if (parsed.optInt("schemaVersion") != version) {
+                    return@withContext null to RestoreResult.Error("Backup integrity verification failed.")
+                }
+                parsed to null
+            }
+            data.second?.let { return it }
+            val json = data.first!!
+
+            json.optJSONObject("settings")?.let { s ->
+                val searchEngine = runCatching {
+                    com.example.data.prefs.SearchEngine.valueOf(s.getString("searchEngine"))
+                }.getOrNull()
+                val hp = if (s.has("homepageUrl")) {
+                    s.getString("homepageUrl").trim().takeIf {
+                        it == "weblio://home" || it.startsWith("https://", true) || it.startsWith("http://", true)
+                    }
+                } else null
+                val theme = runCatching {
+                    com.example.ui.theme.AppThemeMode.valueOf(s.getString("themeMode"))
+                }.getOrNull()
+                val adBlock = if (s.has("adBlockerEnabled")) s.getBoolean("adBlockerEnabled") else null
+                val tracker = if (s.has("trackerProtectionEnabled")) s.getBoolean("trackerProtectionEnabled") else null
+                val dnsMode = runCatching {
+                    com.example.data.prefs.DnsFilterMode.valueOf(s.getString("dnsFilterMode"))
+                }.getOrNull()
+                val doh = if (s.has("customDohUrl")) {
+                    s.getString("customDohUrl").trim().takeIf { it.isEmpty() || it.startsWith("https://", true) }
+                } else null
+
+                preferences.applyBackupSettings(
+                    searchEngine = searchEngine,
+                    homepageUrl = hp,
+                    themeMode = theme,
+                    adBlockerEnabled = adBlock,
+                    trackerProtectionEnabled = tracker,
+                    dnsFilterMode = dnsMode,
+                    customDohUrl = doh
+                )
             }
 
             var bmCount = 0
-            data.optJSONArray("bookmarks")?.let { arr ->
+            json.optJSONArray("bookmarks")?.let { arr ->
                 val maxItems = minOf(arr.length(), 2000)
                 for (i in 0 until maxItems) {
                     val o = arr.getJSONObject(i)
@@ -167,7 +187,7 @@ class BackupRestoreManager(
             }
 
             var ruleCount = 0
-            data.optJSONArray("customRules")?.let { arr ->
+            json.optJSONArray("customRules")?.let { arr ->
                 val maxItems = minOf(arr.length(), 2000)
                 for (i in 0 until maxItems) {
                     val o = arr.getJSONObject(i)
@@ -181,7 +201,7 @@ class BackupRestoreManager(
             }
 
             var pwCount = 0
-            data.optJSONArray("passwords")?.let { arr ->
+            json.optJSONArray("passwords")?.let { arr ->
                 val maxItems = minOf(arr.length(), 2000)
                 for (i in 0 until maxItems) {
                     val o = arr.getJSONObject(i)
@@ -196,7 +216,9 @@ class BackupRestoreManager(
             }
 
             RestoreResult.Success("Restored $bmCount bookmarks, $ruleCount rules, and $pwCount encrypted credentials.")
-        }.getOrElse { err ->
+        } catch (ce: kotlinx.coroutines.CancellationException) {
+            throw ce
+        } catch (err: Throwable) {
             RestoreResult.Error("Decryption failed: check your passphrase or file integrity (${err.javaClass.simpleName}).")
         }
     }

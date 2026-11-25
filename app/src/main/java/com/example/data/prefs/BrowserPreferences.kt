@@ -1,17 +1,19 @@
 package com.example.data.prefs
 
 import android.content.Context
+import androidx.datastore.core.DataStore
+import androidx.datastore.preferences.core.PreferenceDataStoreFactory
+import androidx.datastore.preferences.core.Preferences
 import androidx.datastore.preferences.core.booleanPreferencesKey
 import androidx.datastore.preferences.core.edit
 import androidx.datastore.preferences.core.longPreferencesKey
 import androidx.datastore.preferences.core.stringPreferencesKey
-import androidx.datastore.preferences.preferencesDataStore
+import androidx.datastore.preferences.preferencesDataStoreFile
 import com.example.ui.theme.AppThemeMode
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.map
-
-private val Context.browserDataStore by preferencesDataStore(name = "weblio_browser_prefs")
+import java.util.WeakHashMap
 
 enum class SearchEngine(
     val displayName: String,
@@ -170,7 +172,24 @@ data class BrowserSettings(
     val lastSecurityUpdateMillis: Long = 0L
 )
 
+private object BrowserDataStoreRegistry {
+    private val stores = WeakHashMap<Context, DataStore<Preferences>>()
+
+    @Synchronized
+    fun forContext(context: Context): DataStore<Preferences> {
+        val appCtx = context.applicationContext ?: context
+        return stores.getOrPut(appCtx) {
+            PreferenceDataStoreFactory.create(
+                produceFile = { appCtx.preferencesDataStoreFile("weblio_browser_prefs") }
+            )
+        }
+    }
+}
+
 class BrowserPreferences(private val context: Context) {
+
+    private val dataStore: DataStore<Preferences>
+        get() = BrowserDataStoreRegistry.forContext(context)
 
     private object Keys {
         val ACTIVE_PROFILE_ID = longPreferencesKey("active_profile_id")
@@ -213,7 +232,7 @@ class BrowserPreferences(private val context: Context) {
         val LAST_SECURITY_UPDATE = longPreferencesKey("last_security_update")
     }
 
-    val settingsFlow: Flow<BrowserSettings> = context.browserDataStore.data.map { p ->
+    val settingsFlow: Flow<BrowserSettings> = dataStore.data.map { p ->
         BrowserSettings(
             activeProfileId = p[Keys.ACTIVE_PROFILE_ID] ?: 1L,
             defaultSearchEngine = p[Keys.SEARCH_ENGINE]?.let {
@@ -267,48 +286,68 @@ class BrowserPreferences(private val context: Context) {
         )
     }
 
-    suspend fun setActiveProfile(profileId: Long) = context.browserDataStore.edit { it[Keys.ACTIVE_PROFILE_ID] = profileId }
-    suspend fun setSearchEngine(engine: SearchEngine) = context.browserDataStore.edit { it[Keys.SEARCH_ENGINE] = engine.name }
-    suspend fun setSafeSearchEnabled(enabled: Boolean) = context.browserDataStore.edit { it[Keys.SAFE_SEARCH] = enabled }
+    suspend fun setActiveProfile(profileId: Long) = dataStore.edit { it[Keys.ACTIVE_PROFILE_ID] = profileId }
+    suspend fun setSearchEngine(engine: SearchEngine) = dataStore.edit { it[Keys.SEARCH_ENGINE] = engine.name }
+    suspend fun setSafeSearchEnabled(enabled: Boolean) = dataStore.edit { it[Keys.SAFE_SEARCH] = enabled }
     suspend fun isDefaultBookmarksCleanedOnce(): Boolean =
-        context.browserDataStore.data.map { it[Keys.DEFAULT_BOOKMARKS_CLEANED] ?: false }.first()
-    suspend fun markDefaultBookmarksCleaned() = context.browserDataStore.edit { it[Keys.DEFAULT_BOOKMARKS_CLEANED] = true }
-    suspend fun setHomepage(url: String) = context.browserDataStore.edit { it[Keys.HOMEPAGE_URL] = url }
-    suspend fun setStartupBehavior(behavior: StartupBehavior) = context.browserDataStore.edit { it[Keys.STARTUP_BEHAVIOR] = behavior.name }
-    suspend fun setLanguage(lang: String) = context.browserDataStore.edit { it[Keys.LANGUAGE] = lang }
-    suspend fun setThemeMode(mode: AppThemeMode) = context.browserDataStore.edit { it[Keys.THEME_MODE] = mode.name }
-    suspend fun setWallpaperStyle(style: WallpaperStyle) = context.browserDataStore.edit { it[Keys.WALLPAPER_STYLE] = style.name }
-    suspend fun setCustomHomeBackgroundPath(path: String) = context.browserDataStore.edit { it[Keys.CUSTOM_HOME_BG_PATH] = path }
-    suspend fun setForceDarkWeb(enabled: Boolean) = context.browserDataStore.edit { it[Keys.FORCE_DARK_WEB] = enabled }
-    suspend fun setShowQuickLinks(show: Boolean) = context.browserDataStore.edit { it[Keys.SHOW_QUICK_LINKS] = show }
-    suspend fun setCompactToolbar(compact: Boolean) = context.browserDataStore.edit { it[Keys.COMPACT_TOOLBAR] = compact }
-    suspend fun setAdBlockerEnabled(enabled: Boolean) = context.browserDataStore.edit { it[Keys.ADBLOCK_ENABLED] = enabled }
-    suspend fun setTrackerProtection(enabled: Boolean) = context.browserDataStore.edit { it[Keys.TRACKER_PROTECTION] = enabled }
-    suspend fun setPopupBlocking(enabled: Boolean) = context.browserDataStore.edit { it[Keys.POPUP_BLOCKING] = enabled }
-    suspend fun setThirdPartyBlocking(enabled: Boolean) = context.browserDataStore.edit { it[Keys.THIRD_PARTY_BLOCKING] = enabled }
-    suspend fun setCookiePolicy(policy: CookiePolicy) = context.browserDataStore.edit { it[Keys.COOKIE_POLICY] = policy.name }
-    suspend fun setDnsFilterMode(mode: DnsFilterMode) = context.browserDataStore.edit { it[Keys.DNS_FILTER_MODE] = mode.name }
-    suspend fun setCustomDohUrl(url: String) = context.browserDataStore.edit { it[Keys.CUSTOM_DOH_URL] = url }
-    suspend fun setVpnDnsEnabled(enabled: Boolean) = context.browserDataStore.edit { it[Keys.VPN_DNS_ENABLED] = enabled }
-    suspend fun setClearIncognitoOnExit(enabled: Boolean) = context.browserDataStore.edit { it[Keys.CLEAR_INCOGNITO_EXIT] = enabled }
-    suspend fun setSafeBrowsing(enabled: Boolean) = context.browserDataStore.edit { it[Keys.SAFE_BROWSING] = enabled }
-    suspend fun setClipboardGuard(enabled: Boolean) = context.browserDataStore.edit { it[Keys.CLIPBOARD_GUARD] = enabled }
-    suspend fun setBiometricAppLock(enabled: Boolean) = context.browserDataStore.edit { it[Keys.BIOMETRIC_APP_LOCK] = enabled }
-    suspend fun setJavascriptEnabled(enabled: Boolean) = context.browserDataStore.edit { it[Keys.JS_ENABLED] = enabled }
-    suspend fun setDesktopModeDefault(enabled: Boolean) = context.browserDataStore.edit { it[Keys.DESKTOP_MODE_DEFAULT] = enabled }
-    suspend fun setHardwareAcceleration(enabled: Boolean) = context.browserDataStore.edit { it[Keys.HW_ACCEL] = enabled }
-    suspend fun setDownloadLocationLabel(label: String) = context.browserDataStore.edit { it[Keys.DOWNLOAD_LOCATION] = label }
-    suspend fun setDownloadNotifications(enabled: Boolean) = context.browserDataStore.edit { it[Keys.DOWNLOAD_NOTIFS] = enabled }
-    suspend fun setAskBeforeDownload(ask: Boolean) = context.browserDataStore.edit { it[Keys.ASK_BEFORE_DOWNLOAD] = ask }
-    suspend fun incrementBlockedCount(delta: Long = 1L) = context.browserDataStore.edit {
+        dataStore.data.map { it[Keys.DEFAULT_BOOKMARKS_CLEANED] ?: false }.first()
+    suspend fun markDefaultBookmarksCleaned() = dataStore.edit { it[Keys.DEFAULT_BOOKMARKS_CLEANED] = true }
+    suspend fun setHomepage(url: String) = dataStore.edit { it[Keys.HOMEPAGE_URL] = url }
+    suspend fun setStartupBehavior(behavior: StartupBehavior) = dataStore.edit { it[Keys.STARTUP_BEHAVIOR] = behavior.name }
+    suspend fun setLanguage(lang: String) = dataStore.edit { it[Keys.LANGUAGE] = lang }
+    suspend fun setThemeMode(mode: AppThemeMode) = dataStore.edit { it[Keys.THEME_MODE] = mode.name }
+    suspend fun setWallpaperStyle(style: WallpaperStyle) = dataStore.edit { it[Keys.WALLPAPER_STYLE] = style.name }
+    suspend fun setCustomHomeBackgroundPath(path: String) = dataStore.edit { it[Keys.CUSTOM_HOME_BG_PATH] = path }
+    suspend fun setForceDarkWeb(enabled: Boolean) = dataStore.edit { it[Keys.FORCE_DARK_WEB] = enabled }
+    suspend fun setShowQuickLinks(show: Boolean) = dataStore.edit { it[Keys.SHOW_QUICK_LINKS] = show }
+    suspend fun setCompactToolbar(compact: Boolean) = dataStore.edit { it[Keys.COMPACT_TOOLBAR] = compact }
+    suspend fun setAdBlockerEnabled(enabled: Boolean) = dataStore.edit { it[Keys.ADBLOCK_ENABLED] = enabled }
+    suspend fun setTrackerProtection(enabled: Boolean) = dataStore.edit { it[Keys.TRACKER_PROTECTION] = enabled }
+    suspend fun setPopupBlocking(enabled: Boolean) = dataStore.edit { it[Keys.POPUP_BLOCKING] = enabled }
+    suspend fun setThirdPartyBlocking(enabled: Boolean) = dataStore.edit { it[Keys.THIRD_PARTY_BLOCKING] = enabled }
+    suspend fun setCookiePolicy(policy: CookiePolicy) = dataStore.edit { it[Keys.COOKIE_POLICY] = policy.name }
+    suspend fun setDnsFilterMode(mode: DnsFilterMode) = dataStore.edit { it[Keys.DNS_FILTER_MODE] = mode.name }
+    suspend fun setCustomDohUrl(url: String) = dataStore.edit { it[Keys.CUSTOM_DOH_URL] = url }
+    suspend fun setVpnDnsEnabled(enabled: Boolean) = dataStore.edit { it[Keys.VPN_DNS_ENABLED] = enabled }
+    suspend fun setClearIncognitoOnExit(enabled: Boolean) = dataStore.edit { it[Keys.CLEAR_INCOGNITO_EXIT] = enabled }
+    suspend fun setSafeBrowsing(enabled: Boolean) = dataStore.edit { it[Keys.SAFE_BROWSING] = enabled }
+    suspend fun setClipboardGuard(enabled: Boolean) = dataStore.edit { it[Keys.CLIPBOARD_GUARD] = enabled }
+    suspend fun setBiometricAppLock(enabled: Boolean) = dataStore.edit { it[Keys.BIOMETRIC_APP_LOCK] = enabled }
+    suspend fun setJavascriptEnabled(enabled: Boolean) = dataStore.edit { it[Keys.JS_ENABLED] = enabled }
+    suspend fun setDesktopModeDefault(enabled: Boolean) = dataStore.edit { it[Keys.DESKTOP_MODE_DEFAULT] = enabled }
+    suspend fun setHardwareAcceleration(enabled: Boolean) = dataStore.edit { it[Keys.HW_ACCEL] = enabled }
+    suspend fun setDownloadLocationLabel(label: String) = dataStore.edit { it[Keys.DOWNLOAD_LOCATION] = label }
+    suspend fun setDownloadNotifications(enabled: Boolean) = dataStore.edit { it[Keys.DOWNLOAD_NOTIFS] = enabled }
+    suspend fun setAskBeforeDownload(ask: Boolean) = dataStore.edit { it[Keys.ASK_BEFORE_DOWNLOAD] = ask }
+    suspend fun incrementBlockedCount(delta: Long = 1L) = dataStore.edit {
         it[Keys.TOTAL_BLOCKED] = (it[Keys.TOTAL_BLOCKED] ?: 0L) + delta
     }
-    suspend fun setLastFilterUpdate(millis: Long) = context.browserDataStore.edit {
+    suspend fun setLastFilterUpdate(millis: Long) = dataStore.edit {
         it[Keys.LAST_FILTER_UPDATE] = millis
     }
-    suspend fun setHttpsFirstEnabled(enabled: Boolean) = context.browserDataStore.edit { it[Keys.HTTPS_FIRST] = enabled }
-    suspend fun setDownloadScanEnabled(enabled: Boolean) = context.browserDataStore.edit { it[Keys.DOWNLOAD_SCAN] = enabled }
-    suspend fun setCloudHashReputationEnabled(enabled: Boolean) = context.browserDataStore.edit { it[Keys.CLOUD_HASH_REP] = enabled }
-    suspend fun setSecurityNotificationsEnabled(enabled: Boolean) = context.browserDataStore.edit { it[Keys.SECURITY_NOTIFS] = enabled }
-    suspend fun setLastSecurityUpdate(millis: Long) = context.browserDataStore.edit { it[Keys.LAST_SECURITY_UPDATE] = millis }
+    suspend fun setHttpsFirstEnabled(enabled: Boolean) = dataStore.edit { it[Keys.HTTPS_FIRST] = enabled }
+    suspend fun setDownloadScanEnabled(enabled: Boolean) = dataStore.edit { it[Keys.DOWNLOAD_SCAN] = enabled }
+    suspend fun setCloudHashReputationEnabled(enabled: Boolean) = dataStore.edit { it[Keys.CLOUD_HASH_REP] = enabled }
+    suspend fun setSecurityNotificationsEnabled(enabled: Boolean) = dataStore.edit { it[Keys.SECURITY_NOTIFS] = enabled }
+    suspend fun setLastSecurityUpdate(millis: Long) = dataStore.edit { it[Keys.LAST_SECURITY_UPDATE] = millis }
+
+    suspend fun applyBackupSettings(
+        searchEngine: SearchEngine? = null,
+        homepageUrl: String? = null,
+        themeMode: AppThemeMode? = null,
+        adBlockerEnabled: Boolean? = null,
+        trackerProtectionEnabled: Boolean? = null,
+        dnsFilterMode: DnsFilterMode? = null,
+        customDohUrl: String? = null
+    ) {
+        dataStore.edit { prefs ->
+            searchEngine?.let { prefs[Keys.SEARCH_ENGINE] = it.name }
+            homepageUrl?.let { prefs[Keys.HOMEPAGE_URL] = it }
+            themeMode?.let { prefs[Keys.THEME_MODE] = it.name }
+            adBlockerEnabled?.let { prefs[Keys.ADBLOCK_ENABLED] = it }
+            trackerProtectionEnabled?.let { prefs[Keys.TRACKER_PROTECTION] = it }
+            dnsFilterMode?.let { prefs[Keys.DNS_FILTER_MODE] = it.name }
+            customDohUrl?.let { prefs[Keys.CUSTOM_DOH_URL] = it }
+        }
+    }
 }

@@ -18,9 +18,10 @@ class FilterUpdateWorker(
 ) : CoroutineWorker(appContext, params) {
 
     override suspend fun doWork(): Result {
-        val db = WeblioDatabase.getInstance(applicationContext)
-        val repo = WeblioRepository(db)
-        val prefs = BrowserPreferences(applicationContext)
+        val app = applicationContext as? com.example.WeblioApplication
+        val db = app?.database ?: WeblioDatabase.getInstance(applicationContext)
+        val repo = app?.repository ?: WeblioRepository(db)
+        val prefs = app?.preferences ?: BrowserPreferences(applicationContext)
         val client = OkHttpClient.Builder()
             .connectTimeout(15, TimeUnit.SECONDS)
             .readTimeout(20, TimeUnit.SECONDS)

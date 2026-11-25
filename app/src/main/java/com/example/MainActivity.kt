@@ -301,10 +301,6 @@ private fun WeblioAppRoot(
     val quickLinks by viewModel.quickLinks.collectAsState()
     val extensions by viewModel.extensions.collectAsState()
     val sitePermissions by viewModel.sitePermissions.collectAsState()
-    val sessionBlockedCount by viewModel.adBlock.sessionBlockedCount.collectAsState()
-    val recentBlocked by viewModel.adBlock.recentBlocked.collectAsState()
-    val vpnRunning by WeblioDnsVpnService.isRunning.collectAsState()
-    val dnsBlockedCount by WeblioDnsVpnService.dnsBlockedCount.collectAsState()
 
     val sslPrompt by viewModel.sslPrompt.collectAsState()
     val credPrompt by viewModel.credentialPrompt.collectAsState()
@@ -533,12 +529,13 @@ private fun WeblioAppRoot(
                             .clipToBounds()
                     ) {
                         if (isHome || currentTab == null) {
+                            val homeSessionBlockedCount by viewModel.adBlock.sessionBlockedCount.collectAsState()
                             HomeScreen(
                                 settings = settings,
                                 activeProfile = activeProfile,
                                 quickLinks = quickLinks,
                                 isIncognito = currentTab?.isIncognito == true,
-                                sessionBlockedCount = sessionBlockedCount,
+                                sessionBlockedCount = homeSessionBlockedCount,
                                 onNavigateUrl = { viewModel.openUrlInActiveTab(it) },
                                 onSelectSearchEngine = { viewModel.setSearchEngine(it) },
                                 onQrClick = { navController.navigate(WeblioRoute.QrScanner) { launchSingleTop = true } },
@@ -745,6 +742,7 @@ private fun WeblioAppRoot(
         }
 
         composable<WeblioRoute.Tabs> {
+            LaunchedEffect(Unit) { viewModel.ensureTabPreviewsLoaded() }
             val closedTabs by viewModel.closedTabs.collectAsState()
             val tabPreviews by viewModel.tabPreviews.collectAsState()
             TabsScreen(
@@ -845,6 +843,10 @@ private fun WeblioAppRoot(
         composable<WeblioRoute.AdBlock> {
             val adBlockRules by viewModel.adBlockRules.collectAsState()
             val subscriptions by viewModel.filterSubscriptions.collectAsState()
+            val sessionBlockedCount by viewModel.adBlock.sessionBlockedCount.collectAsState()
+            val recentBlocked by viewModel.adBlock.recentBlocked.collectAsState()
+            val vpnRunning by WeblioDnsVpnService.isRunning.collectAsState()
+            val dnsBlockedCount by WeblioDnsVpnService.dnsBlockedCount.collectAsState()
             AdBlockScreen(
                 settings = settings,
                 sessionBlockedCount = sessionBlockedCount,

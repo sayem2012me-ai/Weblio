@@ -4,6 +4,7 @@ import android.app.Application
 import android.content.ClipData
 import android.content.ClipDescription
 import android.content.ClipboardManager
+import android.content.ComponentCallbacks2
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
 import android.graphics.Canvas
@@ -21,6 +22,8 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.withContext
 import java.io.File
 import java.io.FileOutputStream
+import java.util.concurrent.ConcurrentHashMap
+import java.util.concurrent.atomic.AtomicBoolean
 import kotlin.math.roundToInt
 import androidx.work.OneTimeWorkRequestBuilder
 import androidx.work.WorkManager
@@ -292,13 +295,14 @@ class BrowserViewModel(application: Application) : AndroidViewModel(application)
     private var oneTimeAllowedNavUrl: String? = null
     private var sessionThreatHits: Int = 0
     private var clipboardClearJob: Job? = null
-    private val pendingBlockedDelta = AtomicLong(0L)
+    private var pendingBlockedDelta = AtomicLong(0L)
     private var blockedFlushJob: Job? = null
+    private val pendingPageBlockedCounts = ConcurrentHashMap<Long, AtomicLong>()
+    private val pageBlockedFlushScheduled = AtomicBoolean(false)
     private val lastPreviewCaptureMeta = mutableMapOf<Long, Pair<String, Long>>()
     private val dispatchedWebViewIdentity = mutableMapOf<Long, Int>()
-    private val webViewCacheGeneration = mutableMapOf<Int, Long>()
-    private val cacheGeneration = AtomicLong(1L)
     private val tabLastLeftMs = mutableMapOf<Long, Long>()
+    private val webViewLruOrder = ArrayDeque<Long>()
     private var lastBackgroundedAtMs: Long = 0L
 
     init {
@@ -332,13 +336,6 @@ class BrowserViewModel(application: Application) : AndroidViewModel(application)
                     }
 
                     val existingTabs = repo.observeTabs(profileId).first()
-                    val allOpenTabIds = repo.observeProfiles().first()
-                        .flatMap { p -> repo.observeTabs(p.id).first() }
-                        .map { it.id }
-                        .toSet()
-
-                    // Automatically clean stale browser and WebView disk caches on browser open
-                    cleanBrowserDiskCaches(app, allOpenTabIds)
 
                     val initialActiveTabId = when (currentSettings.startupBehavior) {
                         StartupBehavior.HOME_SCREEN -> {
@@ -366,12 +363,12 @@ class BrowserViewModel(application: Application) : AndroidViewModel(application)
                 _activeTabId.value = startup.second
                 val existingTabs = startup.third.first
                 val hadIncognitoTabs = startup.third.second
+                _isStartupReady.value = true
+
                 if (currentSettings.startupBehavior == StartupBehavior.RESTORE_TABS && existingTabs.isNotEmpty()) {
                     loadCachedTabPreviews(existingTabs)
                 }
                 if (hadIncognitoTabs) {
-                    // Defer Chromium CookieManager/ProfileStore cleanup until after first frame renders
-                    // so cold start SurfaceSyncGroup does not stall loading native Chromium on the UI thread.
                     viewModelScope.launch {
                         delay(1_500L)
                         ProfileIsolationManager.clearEphemeralData()
@@ -391,7 +388,14 @@ class BrowserViewModel(application: Application) : AndroidViewModel(application)
             }
         }
 
+        viewModelScope.launch {
+            app.trimMemoryEvents.collect { level ->
+                onTrimMemory(level)
+            }
+        }
+
         viewModelScope.launch(Dispatchers.IO) {
+            delay(1_200L)
             runIntegrityCheck()
             _threatDbCount.value = repo.countThreatIndicators()
             val activeQuarantinePaths = repo.observeDownloads(activeProfileId.value).first()
@@ -402,19 +406,120 @@ class BrowserViewModel(application: Application) : AndroidViewModel(application)
         }
     }
 
+    fun getLiveWebViewCount(): Int = webViewRegistry.size
+
     fun registerWebView(tabId: Long, webView: WebView) {
         webViewRegistry[tabId] = webView
+        touchWebViewLru(tabId)
+        if (_activeTabId.value == tabId || activeTab.value?.id == tabId) {
+            resumeWebViewForForeground(webView)
+        } else {
+            pauseWebViewForBackground(tabId, webView)
+        }
     }
 
     fun getWebView(tabId: Long): WebView? = webViewRegistry[tabId]
+
+    private fun touchWebViewLru(tabId: Long) {
+        webViewLruOrder.remove(tabId)
+        webViewLruOrder.addLast(tabId)
+        evictBackgroundWebViews(keepTotal = MAX_LIVE_WEBVIEWS)
+    }
+
+    fun evictBackgroundWebViews(keepTotal: Int = MAX_LIVE_WEBVIEWS) {
+        if (webViewRegistry.size <= keepTotal) return
+        val currentActiveId = _activeTabId.value ?: activeTab.value?.id
+        val iterator = webViewLruOrder.iterator()
+        val toEvict = mutableListOf<Long>()
+        var remainingCount = webViewRegistry.size
+        while (iterator.hasNext() && remainingCount > keepTotal) {
+            val candidateId = iterator.next()
+            if (candidateId == currentActiveId) continue
+            if (_tabRuntime.value[candidateId]?.isMediaPlaying == true) continue
+            if (webViewRegistry.containsKey(candidateId)) {
+                toEvict.add(candidateId)
+                iterator.remove()
+                remainingCount--
+            } else {
+                iterator.remove()
+            }
+        }
+        toEvict.forEach { evictId ->
+            destroyWebViewOnly(evictId)
+        }
+    }
+
+    private fun destroyWebViewOnly(tabId: Long) {
+        lastDispatchedUrl.remove(tabId)
+        dispatchedWebViewIdentity.remove(tabId)
+        webViewLruOrder.remove(tabId)
+        webViewRegistry.remove(tabId)?.apply {
+            stopLoading()
+            webChromeClient = null
+            webViewClient = WebViewClient()
+            onPause()
+            (parent as? android.view.ViewGroup)?.removeView(this)
+            removeAllViews()
+            destroy()
+        }
+    }
+
+    private fun pauseWebViewForBackground(tabId: Long, webView: WebView) {
+        if (_tabRuntime.value[tabId]?.isMediaPlaying == true) return
+        runCatching {
+            webView.onPause()
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                webView.setRendererPriorityPolicy(WebView.RENDERER_PRIORITY_WAIVED, true)
+            }
+        }
+    }
+
+    private fun resumeWebViewForForeground(webView: WebView) {
+        runCatching {
+            webView.onResume()
+            webView.resumeTimers()
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                webView.setRendererPriorityPolicy(WebView.RENDERER_PRIORITY_IMPORTANT, true)
+            }
+        }
+    }
+
+    @Suppress("DEPRECATION")
+    fun onTrimMemory(level: Int) {
+        val keepCount = when {
+            level >= ComponentCallbacks2.TRIM_MEMORY_BACKGROUND -> 1
+            level >= ComponentCallbacks2.TRIM_MEMORY_RUNNING_LOW ||
+                level == ComponentCallbacks2.TRIM_MEMORY_UI_HIDDEN -> 2
+            else -> MAX_LIVE_WEBVIEWS
+        }
+        if (keepCount < MAX_LIVE_WEBVIEWS) {
+            evictBackgroundWebViews(keepTotal = keepCount)
+        }
+        if (level >= ComponentCallbacks2.TRIM_MEMORY_RUNNING_LOW ||
+            level == ComponentCallbacks2.TRIM_MEMORY_UI_HIDDEN ||
+            level >= ComponentCallbacks2.TRIM_MEMORY_BACKGROUND
+        ) {
+            _tabPreviews.value = emptyMap()
+        }
+    }
+
+    fun ensureTabPreviewsLoaded() {
+        val currentTabs = tabs.value
+        if (currentTabs.isEmpty()) return
+        val existingPreviews = _tabPreviews.value
+        val needsLoad = currentTabs.any { it.url != "weblio://home" && !existingPreviews.containsKey(it.id) }
+        if (needsLoad) {
+            loadCachedTabPreviews(currentTabs)
+        }
+    }
 
     fun unregisterWebView(tabId: Long) {
         lastDispatchedUrl.remove(tabId)
         dispatchedWebViewIdentity.remove(tabId)
         lastPreviewCaptureMeta.remove(tabId)
+        webViewLruOrder.remove(tabId)
         val wasPlayingMedia = _tabRuntime.value[tabId]?.isMediaPlaying == true
         webViewRegistry.remove(tabId)?.apply {
-            webViewCacheGeneration.remove(System.identityHashCode(this))
             stopLoading()
             webChromeClient = null
             webViewClient = WebViewClient()
@@ -438,8 +543,9 @@ class BrowserViewModel(application: Application) : AndroidViewModel(application)
 
     fun handleRendererProcessGone(tabId: Long, crashedView: WebView?, didCrash: Boolean) {
         if (crashedView == null || webViewRegistry[tabId] === crashedView) {
-            webViewRegistry.remove(tabId)?.let { webViewCacheGeneration.remove(System.identityHashCode(it)) }
+            webViewRegistry.remove(tabId)
         }
+        webViewLruOrder.remove(tabId)
         lastDispatchedUrl.remove(tabId)
         dispatchedWebViewIdentity.remove(tabId)
         val previous = _tabRuntime.value[tabId] ?: TabRuntimeState(tabId = tabId)
@@ -472,16 +578,7 @@ class BrowserViewModel(application: Application) : AndroidViewModel(application)
         lastDispatchedUrl.remove(tabId)
         dispatchedWebViewIdentity.remove(tabId)
         if (forceRecreateWebView) {
-            webViewRegistry.remove(tabId)?.apply {
-                webViewCacheGeneration.remove(System.identityHashCode(this))
-                stopLoading()
-                webChromeClient = null
-                webViewClient = WebViewClient()
-                onPause()
-                (parent as? android.view.ViewGroup)?.removeView(this)
-                removeAllViews()
-                destroy()
-            }
+            destroyWebViewOnly(tabId)
         }
         val wv = webViewRegistry[tabId]
         updateRuntimeState(tabId) {
@@ -494,25 +591,12 @@ class BrowserViewModel(application: Application) : AndroidViewModel(application)
             )
         }
         if (wv != null) {
-            runCatching {
-                wv.onResume()
-                wv.resumeTimers()
-                wv.clearCache(true)
-            }
+            resumeWebViewForForeground(wv)
+            touchWebViewLru(tabId)
             lastDispatchedUrl[tabId] = targetUrl
             dispatchedWebViewIdentity[tabId] = System.identityHashCode(wv)
             wv.loadUrl(targetUrl)
         }
-    }
-
-    fun consumeWebViewCacheClear(webView: WebView): Boolean {
-        val hash = System.identityHashCode(webView)
-        val gen = cacheGeneration.get()
-        if (webViewCacheGeneration[hash] != gen) {
-            webViewCacheGeneration[hash] = gen
-            return true
-        }
-        return false
     }
 
     fun onAppBackgrounded() {
@@ -520,36 +604,25 @@ class BrowserViewModel(application: Application) : AndroidViewModel(application)
         lastBackgroundedAtMs = now
         activeTab.value?.id?.let { tabLastLeftMs[it] = now }
         webViewRegistry.forEach { (tabId, wv) ->
-            if (_tabRuntime.value[tabId]?.isMediaPlaying != true) {
-                runCatching { wv.onPause() }
-            }
+            pauseWebViewForBackground(tabId, wv)
         }
     }
 
     fun onAppResumed(
-        cacheCleanThresholdMs: Long = AUTO_CACHE_CLEAN_RESUME_MS,
         staleTabThresholdMs: Long = STALE_TAB_RELOAD_MS
     ) {
-        webViewRegistry.values.forEach { wv ->
-            runCatching {
-                wv.onResume()
-                wv.resumeTimers()
+        val activeId = _activeTabId.value ?: activeTab.value?.id
+        activeId?.let { id ->
+            webViewRegistry[id]?.let { wv ->
+                resumeWebViewForForeground(wv)
+                touchWebViewLru(id)
             }
         }
         val bgAt = lastBackgroundedAtMs
         if (bgAt <= 0L) return
         lastBackgroundedAtMs = 0L
-        val elapsed = (System.currentTimeMillis() - bgAt).coerceAtLeast(0L)
-        if (elapsed >= cacheCleanThresholdMs) {
-            cacheGeneration.incrementAndGet()
-            val openIds = tabs.value.map { it.id }.toSet()
-            viewModelScope.launch(Dispatchers.IO) {
-                cleanBrowserDiskCaches(app, openIds)
-            }
-            webViewRegistry.values.forEach { wv ->
-                runCatching { wv.clearCache(true) }
-            }
-        }
+        val now = System.currentTimeMillis()
+        val elapsed = (now - bgAt).coerceAtLeast(0L)
         val active = activeTab.value ?: return
         val currentUrl = _tabRuntime.value[active.id]?.currentUrl ?: active.url
         if (currentUrl.isNotBlank() && currentUrl != "weblio://home") {
@@ -749,7 +822,8 @@ class BrowserViewModel(application: Application) : AndroidViewModel(application)
     // Tab Navigation & Lifecycle
     fun openUrlInActiveTab(rawInput: String) {
         val current = activeTab.value
-        var url = resolveInputToUrl(rawInput, settings.value.defaultSearchEngine, settings.value.safeSearchEnabled)
+        val s = settings.value
+        var url = resolveInputToUrl(rawInput, s.defaultSearchEngine, s.safeSearchEnabled)
         if (current == null) {
             openNewTab(url)
             return
@@ -759,36 +833,50 @@ class BrowserViewModel(application: Application) : AndroidViewModel(application)
             return
         }
         // HTTPS-first upgrade for external hosts unless already https
-        if (settings.value.httpsFirstEnabled && url.startsWith("http://", ignoreCase = true)) {
+        if (s.httpsFirstEnabled && url.startsWith("http://", ignoreCase = true)) {
             val host = extractHost(url)
             if (host.isNotBlank() && host != "localhost" && !host.startsWith("127.") && !host.startsWith("192.168.")) {
                 url = "https://" + url.removePrefix("http://")
             }
         }
         val cleanUrl = if (url.startsWith("http")) adBlock.cleanTrackingUrl(url) else url
-        val isLocalPreview = extractHost(cleanUrl).equals(WeblioDownloadManager.LOCAL_PREVIEW_HOST, ignoreCase = true)
+        val initialTitle = extractHost(cleanUrl).ifBlank { cleanUrl }
+        val isLocalPreview = initialTitle.equals(WeblioDownloadManager.LOCAL_PREVIEW_HOST, ignoreCase = true)
         val isExtensionStore = ExtensionEngine.isExtensionStoreUrl(cleanUrl)
+        val checkSafeBrowsing = s.safeBrowsingEnabled && !isLocalPreview
+
+        if (checkSafeBrowsing) {
+            val syncThreat = threatEngine.quickEvaluateSync(cleanUrl)
+            if (syncThreat != null && !consumeOneTimeAllowance(cleanUrl)) {
+                triggerWebsiteWarning(current.id, syncThreat, current.isIncognito)
+                return
+            }
+        }
+
+        val forceDesktop = current.desktopMode || isExtensionStore
+        updateRuntimeState(current.id) {
+            it.copy(
+                currentUrl = cleanUrl,
+                title = initialTitle,
+                isLoading = true,
+                progress = 5,
+                errorBanner = null,
+                findInPageOpen = false,
+                isDesktopMode = forceDesktop
+            )
+        }
+        webViewRegistry[current.id]?.let { wv ->
+            resumeWebViewForForeground(wv)
+            touchWebViewLru(current.id)
+            if (forceDesktop) {
+                applyDesktopUserAgent(wv, true, forceInitialScale = true)
+            }
+            lastDispatchedUrl[current.id] = cleanUrl
+            dispatchedWebViewIdentity[current.id] = System.identityHashCode(wv)
+            wv.loadUrl(cleanUrl)
+        }
+
         viewModelScope.launch {
-            if (settings.value.safeBrowsingEnabled && !isLocalPreview && !consumeOneTimeAllowance(cleanUrl)) {
-                val report = threatEngine.evaluateNavigation(cleanUrl, settings.value.cloudHashReputationEnabled)
-                if (report.verdict != WebsiteVerdict.SAFE) {
-                    triggerWebsiteWarning(current.id, report, current.isIncognito)
-                    return@launch
-                }
-            }
-            val initialTitle = extractHost(cleanUrl).ifBlank { cleanUrl }
-            val forceDesktop = current.desktopMode || isExtensionStore
-            updateRuntimeState(current.id) {
-                it.copy(
-                    currentUrl = cleanUrl,
-                    title = initialTitle,
-                    isLoading = true,
-                    progress = 5,
-                    errorBanner = null,
-                    findInPageOpen = false,
-                    isDesktopMode = forceDesktop
-                )
-            }
             if (isExtensionStore && !current.desktopMode) {
                 repo.updateTab(
                     current.copy(
@@ -801,12 +889,11 @@ class BrowserViewModel(application: Application) : AndroidViewModel(application)
             } else {
                 repo.updateTabUrlAndTitle(current.id, cleanUrl, initialTitle, System.currentTimeMillis())
             }
-            webViewRegistry[current.id]?.let { wv ->
-                if (forceDesktop) {
-                    applyDesktopUserAgent(wv, true, forceInitialScale = true)
+            if (checkSafeBrowsing) {
+                val report = threatEngine.evaluateNavigation(cleanUrl, s.cloudHashReputationEnabled)
+                if (report.verdict != WebsiteVerdict.SAFE && !consumeOneTimeAllowance(cleanUrl)) {
+                    triggerWebsiteWarning(current.id, report, current.isIncognito)
                 }
-                lastDispatchedUrl[current.id] = cleanUrl
-                wv.loadUrl(cleanUrl)
             }
         }
     }
@@ -998,6 +1085,9 @@ class BrowserViewModel(application: Application) : AndroidViewModel(application)
         val now = System.currentTimeMillis()
         activeTab.value?.id?.takeIf { it != tabId }?.let { prevId ->
             tabLastLeftMs[prevId] = now
+            webViewRegistry[prevId]?.let { prevWv ->
+                pauseWebViewForBackground(prevId, prevWv)
+            }
         }
         _activeTabId.value = tabId
         val targetTab = tabs.value.firstOrNull { it.id == tabId }
@@ -1013,10 +1103,8 @@ class BrowserViewModel(application: Application) : AndroidViewModel(application)
             } else if (staleByAge || surfaceMissing) {
                 recoverStaleTab(tabId, forceRecreateWebView = wv.url.isNullOrBlank())
             } else {
-                runCatching {
-                    wv.onResume()
-                    wv.resumeTimers()
-                }
+                resumeWebViewForForeground(wv)
+                touchWebViewLru(tabId)
             }
         }
         viewModelScope.launch {
@@ -1790,8 +1878,32 @@ class BrowserViewModel(application: Application) : AndroidViewModel(application)
     // AdBlock & Site Permissions
     fun onBlockedRequest(url: String) {
         pendingBlockedDelta.incrementAndGet()
-        activeTab.value?.id?.let { tid ->
-            updateRuntimeState(tid) { it.copy(blockedOnPage = it.blockedOnPage + 1) }
+        val tid = _activeTabId.value ?: activeTab.value?.id
+        if (tid != null) {
+            pendingPageBlockedCounts.computeIfAbsent(tid) { AtomicLong(0L) }.incrementAndGet()
+            if (pageBlockedFlushScheduled.compareAndSet(false, true)) {
+                viewModelScope.launch {
+                    delay(350L)
+                    pageBlockedFlushScheduled.set(false)
+                    if (pendingPageBlockedCounts.isNotEmpty()) {
+                        val updates = mutableMapOf<Long, Long>()
+                        pendingPageBlockedCounts.keys().toList().forEach { key ->
+                            val d = pendingPageBlockedCounts[key]?.getAndSet(0L) ?: 0L
+                            if (d > 0L) updates[key] = d
+                        }
+                        if (updates.isNotEmpty()) {
+                            _tabRuntime.update { map ->
+                                var next = map
+                                updates.forEach { (id, d) ->
+                                    val cur = next[id] ?: TabRuntimeState(tabId = id)
+                                    next = next + (id to cur.copy(blockedOnPage = cur.blockedOnPage + d.toInt()))
+                                }
+                                next
+                            }
+                        }
+                    }
+                }
+            }
         }
         if (blockedFlushJob?.isActive != true) {
             blockedFlushJob = viewModelScope.launch {
@@ -2076,10 +2188,17 @@ class BrowserViewModel(application: Application) : AndroidViewModel(application)
         }
     }
 
+    override fun onCleared() {
+        webViewRegistry.keys.toList().forEach { destroyWebViewOnly(it) }
+        _tabPreviews.value = emptyMap()
+        super.onCleared()
+    }
+
     companion object {
         const val DESKTOP_USER_AGENT =
             "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
         const val DESKTOP_VIEWPORT_WIDTH_DP = 1200f
+        const val MAX_LIVE_WEBVIEWS = 3
 
         fun computeDesktopInitialScalePercent(
             viewWidthPx: Int,
@@ -2150,62 +2269,6 @@ class BrowserViewModel(application: Application) : AndroidViewModel(application)
             return tabs.count { it.isIncognito == isIncognito }
         }
 
-        const val AUTO_CACHE_CLEAN_RESUME_MS = 60_000L
         const val STALE_TAB_RELOAD_MS = 10L * 60_000L
-
-        private val CHROMIUM_CACHE_DIR_NAMES = setOf(
-            "Cache",
-            "Code Cache",
-            "GPUCache",
-            "DawnGraphiteCache",
-            "DawnWebGPUCache",
-            "ShaderCache"
-        )
-
-        fun cleanBrowserDiskCaches(context: android.content.Context, activeTabIds: Set<Long> = emptySet()) {
-            runCatching {
-                context.cacheDir?.listFiles()?.forEach { child ->
-                    if (child.name == "tab_previews") {
-                        if (activeTabIds.isNotEmpty()) {
-                            child.listFiles()?.forEach { preview ->
-                                val id = preview.name.removePrefix("tab_").removeSuffix(".jpg").toLongOrNull()
-                                if (id == null || id !in activeTabIds) {
-                                    preview.delete()
-                                }
-                            }
-                        }
-                    } else {
-                        child.deleteRecursively()
-                    }
-                }
-            }
-            runCatching {
-                context.codeCacheDir?.listFiles()?.forEach { it.deleteRecursively() }
-            }
-            runCatching {
-                val dataRoot = File(context.applicationInfo.dataDir)
-                dataRoot.listFiles()?.forEach { dir ->
-                    if (dir.isDirectory && dir.name.startsWith("app_webview")) {
-                        cleanWebViewProfileCachesRecursively(dir)
-                    }
-                }
-            }
-        }
-
-        private fun cleanWebViewProfileCachesRecursively(dir: File, depth: Int = 0) {
-            if (depth > 3) return
-            dir.listFiles()?.forEach { child ->
-                if (!child.isDirectory) return@forEach
-                when {
-                    child.name in CHROMIUM_CACHE_DIR_NAMES -> child.deleteRecursively()
-                    child.name == "Service Worker" -> {
-                        File(child, "CacheStorage").takeIf { it.exists() }?.deleteRecursively()
-                    }
-                    child.name == "Default" || child.name.startsWith("weblio_") || child.name.startsWith("Profile") -> {
-                        cleanWebViewProfileCachesRecursively(child, depth + 1)
-                    }
-                }
-            }
-        }
     }
 }

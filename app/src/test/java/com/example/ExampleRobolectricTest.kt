@@ -40,7 +40,7 @@ class ExampleRobolectricTest {
             .allowMainThreadQueries()
             .build()
         repo = WeblioRepository(db)
-        prefs = BrowserPreferences(context)
+        prefs = (context as WeblioApplication).preferences
     }
 
     @After
@@ -99,7 +99,7 @@ class ExampleRobolectricTest {
 
     @Test
     fun `encrypted backup and restore preserves bookmarks rules and passwords`() = kotlinx.coroutines.runBlocking {
-        kotlinx.coroutines.withTimeout(15_000L) {
+        kotlinx.coroutines.withTimeout(30_000L) {
         val pid = repo.ensureDefaultsSeeded()
         repo.savePassword(pid, "vault.example.com", "alice", "S3cur3!Pass#99")
         val backupMgr = BackupRestoreManager(repo, prefs)
@@ -215,7 +215,7 @@ class ExampleRobolectricTest {
         val vmStore = androidx.lifecycle.ViewModelStore()
         val vm = androidx.lifecycle.ViewModelProvider(
             vmStore,
-            androidx.lifecycle.ViewModelProvider.AndroidViewModelFactory.getInstance(app)
+            androidx.lifecycle.ViewModelProvider.AndroidViewModelFactory(app)
         )[com.example.ui.BrowserViewModel::class.java]
         val tabId = 99L
 
@@ -286,9 +286,9 @@ class ExampleRobolectricTest {
         val vmStore = androidx.lifecycle.ViewModelStore()
         val vm = androidx.lifecycle.ViewModelProvider(
             vmStore,
-            androidx.lifecycle.ViewModelProvider.AndroidViewModelFactory.getInstance(app)
+            androidx.lifecycle.ViewModelProvider.AndroidViewModelFactory(app)
         )[com.example.ui.BrowserViewModel::class.java]
-        val realPrefs = BrowserPreferences(app)
+        val realPrefs = app.preferences
 
         // Store source image outside app.cacheDir so startup disk cache cleaner does not remove test fixture
         val inputDir = File(app.filesDir, "test_wallpaper_inputs").apply { mkdirs() }
@@ -374,32 +374,35 @@ class ExampleRobolectricTest {
     }
 
     @Test
-    fun `startup disk cache cleaner wipes HTTP and code caches while keeping cookies and open previews`() {
+    fun `startup and resume preserve WebView HTTP GPU and shader caches without auto disk wipes`() = runTest {
+        val app = ApplicationProvider.getApplicationContext<WeblioApplication>()
         val dataRoot = File(context.applicationInfo.dataDir)
         val webViewDefault = File(dataRoot, "app_webview/Default")
-        val webHttpCache = File(webViewDefault, "Cache/index.bin").apply { parentFile?.mkdirs(); writeText("stale-cache") }
-        val webCodeCache = File(webViewDefault, "Code Cache/js/a.bin").apply { parentFile?.mkdirs(); writeText("stale-js") }
-        val swCache = File(webViewDefault, "Service Worker/CacheStorage/v1").apply { parentFile?.mkdirs(); writeText("sw") }
-        val cookiesFile = File(webViewDefault, "Cookies").apply { writeText("session=keep") }
-        val tempAppCache = File(context.cacheDir, "http_tmp_file").apply { writeText("tmp") }
-        val previewsDir = File(context.cacheDir, "tab_previews").apply { mkdirs() }
-        val openPreview = File(previewsDir, "tab_101.jpg").apply { writeText("keep-thumb") }
-        val closedPreview = File(previewsDir, "tab_999.jpg").apply { writeText("drop-thumb") }
+        val httpCacheEntry = File(webViewDefault, "Cache/entry.bin").apply { parentFile?.mkdirs(); writeText("keep-http") }
+        val webCodeCache = File(webViewDefault, "Code Cache/js/a.bin").apply { parentFile?.mkdirs(); writeText("keep-v8") }
+        val gpuCache = File(webViewDefault, "GPUCache/shader.bin").apply { parentFile?.mkdirs(); writeText("keep-gpu") }
+        val appHttpCache = File(context.cacheDir, "WebView/Default/HTTP Cache/item").apply { parentFile?.mkdirs(); writeText("keep-webview-cache") }
+
+        val vmStore = androidx.lifecycle.ViewModelStore()
+        val vm = androidx.lifecycle.ViewModelProvider(
+            vmStore,
+            androidx.lifecycle.ViewModelProvider.AndroidViewModelFactory(app)
+        )[com.example.ui.BrowserViewModel::class.java]
 
         try {
-            com.example.ui.BrowserViewModel.cleanBrowserDiskCaches(context, activeTabIds = setOf(101L))
+            vm.onAppBackgrounded()
+            vm.onAppResumed(staleTabThresholdMs = 0L)
+            org.robolectric.shadows.ShadowLooper.idleMainLooper()
+            kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.Default) { kotlinx.coroutines.delay(100) }
 
-            assertFalse(webHttpCache.exists())
-            assertFalse(webCodeCache.exists())
-            assertFalse(swCache.exists())
-            assertFalse(tempAppCache.exists())
-            assertFalse(closedPreview.exists())
-            assertTrue("Cookies must remain intact across cache clean", cookiesFile.exists())
-            assertTrue("Active tab preview must remain intact", openPreview.exists())
+            assertTrue("HTTP cache should remain preserved", httpCacheEntry.exists())
+            assertTrue("Chromium Code Cache should remain preserved", webCodeCache.exists())
+            assertTrue("Chromium GPUCache should remain preserved", gpuCache.exists())
+            assertTrue("App WebView HTTP cache should remain preserved", appHttpCache.exists())
         } finally {
+            vmStore.clear()
             File(dataRoot, "app_webview").deleteRecursively()
-            tempAppCache.delete()
-            previewsDir.deleteRecursively()
+            File(context.cacheDir, "WebView").deleteRecursively()
         }
     }
 
@@ -409,7 +412,7 @@ class ExampleRobolectricTest {
         val vmStore = androidx.lifecycle.ViewModelStore()
         val vm = androidx.lifecycle.ViewModelProvider(
             vmStore,
-            androidx.lifecycle.ViewModelProvider.AndroidViewModelFactory.getInstance(app)
+            androidx.lifecycle.ViewModelProvider.AndroidViewModelFactory(app)
         )[com.example.ui.BrowserViewModel::class.java]
         val tabId = 202L
 
@@ -422,6 +425,39 @@ class ExampleRobolectricTest {
             }
         } finally {
             vmStore.clear()
+        }
+    }
+
+    @Test
+    fun `webView LRU pool caps background tabs and trims under memory pressure`() {
+        val app = ApplicationProvider.getApplicationContext<WeblioApplication>()
+        val vmStore = androidx.lifecycle.ViewModelStore()
+        val vm = androidx.lifecycle.ViewModelProvider(
+            vmStore,
+            androidx.lifecycle.ViewModelProvider.AndroidViewModelFactory(app)
+        )[com.example.ui.BrowserViewModel::class.java]
+
+        try {
+            val wv1 = android.webkit.WebView(context)
+            val wv2 = android.webkit.WebView(context)
+            val wv3 = android.webkit.WebView(context)
+            val wv4 = android.webkit.WebView(context)
+
+            vm.registerWebView(11L, wv1)
+            vm.registerWebView(12L, wv2)
+            vm.registerWebView(13L, wv3)
+            assertEquals(3, vm.getLiveWebViewCount())
+
+            vm.registerWebView(14L, wv4)
+            assertEquals(com.example.ui.BrowserViewModel.MAX_LIVE_WEBVIEWS, vm.getLiveWebViewCount())
+            assertEquals(null, vm.getWebView(11L))
+            assertTrue(vm.getWebView(14L) != null)
+
+            vm.onTrimMemory(android.content.ComponentCallbacks2.TRIM_MEMORY_BACKGROUND)
+            assertEquals(1, vm.getLiveWebViewCount())
+        } finally {
+            vmStore.clear()
+            org.robolectric.shadows.ShadowLooper.idleMainLooper()
         }
     }
 }

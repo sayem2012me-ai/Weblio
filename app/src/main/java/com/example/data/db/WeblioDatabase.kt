@@ -41,8 +41,7 @@ abstract class WeblioDatabase : RoomDatabase() {
     abstract fun securityEventDao(): SecurityEventDao
 
     companion object {
-        @Volatile
-        private var INSTANCE: WeblioDatabase? = null
+        private val instances = java.util.WeakHashMap<Context, WeblioDatabase>()
 
         val MIGRATION_1_2 = object : Migration(1, 2) {
             override fun migrate(db: SupportSQLiteDatabase) {
@@ -99,15 +98,18 @@ abstract class WeblioDatabase : RoomDatabase() {
         }
 
         fun getInstance(context: Context): WeblioDatabase {
-            return INSTANCE ?: synchronized(this) {
-                INSTANCE ?: Room.databaseBuilder(
-                    context.applicationContext,
+            val appCtx = context.applicationContext ?: context
+            synchronized(this) {
+                val existing = instances[appCtx]
+                if (existing != null) return existing
+                return Room.databaseBuilder(
+                    appCtx,
                     WeblioDatabase::class.java,
                     "weblio_browser.db"
                 )
                     .addMigrations(MIGRATION_1_2, MIGRATION_2_3)
                     .build()
-                    .also { INSTANCE = it }
+                    .also { instances[appCtx] = it }
             }
         }
     }

@@ -817,7 +817,7 @@ class WeblioComposeUiTest {
         val vmStore = androidx.lifecycle.ViewModelStore()
         val vm = androidx.lifecycle.ViewModelProvider(
             vmStore,
-            androidx.lifecycle.ViewModelProvider.AndroidViewModelFactory.getInstance(app)
+            androidx.lifecycle.ViewModelProvider.AndroidViewModelFactory(app)
         )[BrowserViewModel::class.java]
         val tempImg = File.createTempFile("weblo_settings_bg_", ".png")
         val bmp = Bitmap.createBitmap(16, 16, Bitmap.Config.ARGB_8888)

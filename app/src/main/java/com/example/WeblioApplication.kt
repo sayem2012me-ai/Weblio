@@ -1,6 +1,7 @@
 package com.example
 
 import android.app.Application
+import android.content.ComponentCallbacks2
 import androidx.work.Constraints
 import androidx.work.ExistingPeriodicWorkPolicy
 import androidx.work.NetworkType
@@ -23,12 +24,18 @@ import com.example.security.ThreatIntelligenceEngine
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.flow.MutableSharedFlow
+import kotlinx.coroutines.flow.SharedFlow
+import kotlinx.coroutines.flow.asSharedFlow
 import kotlinx.coroutines.launch
 import java.util.concurrent.TimeUnit
 
 class WeblioApplication : Application() {
 
     private val appScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+
+    private val _trimMemoryEvents = MutableSharedFlow<Int>(extraBufferCapacity = 4)
+    val trimMemoryEvents: SharedFlow<Int> = _trimMemoryEvents.asSharedFlow()
 
     lateinit var database: WeblioDatabase
         private set
@@ -75,6 +82,22 @@ class WeblioApplication : Application() {
             downloadManager.cleanupAbandonedQuarantine()
             scheduleFilterUpdates()
         }
+    }
+
+    @Suppress("DEPRECATION")
+    override fun onTrimMemory(level: Int) {
+        super.onTrimMemory(level)
+        _trimMemoryEvents.tryEmit(level)
+        if (level >= ComponentCallbacks2.TRIM_MEMORY_MODERATE || level == ComponentCallbacks2.TRIM_MEMORY_UI_HIDDEN) {
+            runCatching { Coil.imageLoader(this).memoryCache?.clear() }
+        }
+    }
+
+    @Suppress("DEPRECATION")
+    override fun onLowMemory() {
+        super.onLowMemory()
+        _trimMemoryEvents.tryEmit(ComponentCallbacks2.TRIM_MEMORY_COMPLETE)
+        runCatching { Coil.imageLoader(this).memoryCache?.clear() }
     }
 
     private fun scheduleFilterUpdates() {

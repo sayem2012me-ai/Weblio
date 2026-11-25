@@ -128,7 +128,13 @@ fun BrowserWebViewContainer(
     val scope = rememberCoroutineScope()
     val latestTab by rememberUpdatedState(tab)
     val latestExtensions by rememberUpdatedState(extensions)
+    val hasEnabledExtensions = remember(extensions) { extensions.any { it.enabled } }
+    val latestHasEnabledExtensions by rememberUpdatedState(hasEnabledExtensions)
     val latestPermissions by rememberUpdatedState(sitePermissions)
+    val permByHost = remember(sitePermissions) { sitePermissions.associateBy { it.originHost } }
+    val latestPermByHost by rememberUpdatedState(permByHost)
+    val currentPageHost = remember(tab.url) { BrowserViewModel.extractHost(tab.url) }
+    val latestPageHost by rememberUpdatedState(currentPageHost)
     val latestSettings by rememberUpdatedState(settings)
 
     var fileChooserCallback by remember { mutableStateOf<ValueCallback<Array<Uri>>?>(null) }
@@ -325,7 +331,8 @@ fun BrowserWebViewContainer(
         }
     }
 
-    // Sync only WebView-relevant settings so unrelated counter increments (e.g. blocked count) don't re-apply settings
+    val currentHostSitePerm = permByHost[currentPageHost]
+    // Sync only WebView-relevant settings so unrelated counter increments or same-host navigations don't re-apply JNI settings
     LaunchedEffect(
         settings.javascriptEnabled,
         settings.safeBrowsingEnabled,
@@ -334,13 +341,12 @@ fun BrowserWebViewContainer(
         settings.desktopModeDefault,
         settings.cookiePolicy,
         tab.desktopMode,
-        tab.url,
-        sitePermissions
+        currentPageHost,
+        currentHostSitePerm,
+        ExtensionEngine.isExtensionStoreUrl(tab.url)
     ) {
-        val pageHost = BrowserViewModel.extractHost(tab.url)
-        val sitePerm = sitePermissions.firstOrNull { it.originHost == pageHost }
-        val useDesktop = tab.desktopMode || (sitePerm?.desktopMode == true) || ExtensionEngine.isExtensionStoreUrl(tab.url)
-        configureWebSettings(webView, settings, useDesktop, tab.isIncognito, sitePerm)
+        val useDesktop = tab.desktopMode || (currentHostSitePerm?.desktopMode == true) || ExtensionEngine.isExtensionStoreUrl(tab.url)
+        configureWebSettings(webView, settings, useDesktop, tab.isIncognito, currentHostSitePerm)
     }
 
     var lastZoomFitUrl by remember(tab.id, webViewInstanceVersion) { mutableStateOf<String?>(null) }
@@ -376,9 +382,8 @@ fun BrowserWebViewContainer(
                         downloadsRoot = viewModel.downloadManager.quarantineManager.downloadsDir
                     )
                 }
-                val currentPageUrl = latestTab.url
-                val pageHost = BrowserViewModel.extractHost(currentPageUrl)
-                val sitePerm = latestPermissions.firstOrNull { it.originHost == pageHost }
+                val pageHost = latestPageHost
+                val sitePerm = latestPermByHost[pageHost]
                 val siteAdBlock = sitePerm?.adBlockEnabled ?: true
                 return viewModel.adBlock.interceptRequest(
                     request = request,
@@ -397,13 +402,18 @@ fun BrowserWebViewContainer(
                     return false
                 }
 
-                val isStoreOrDesktop = ExtensionEngine.isExtensionStoreUrl(urlStr) ||
+                val isStoreUrl = ExtensionEngine.isExtensionStoreUrl(urlStr)
+                val isStoreOrDesktop = isStoreUrl ||
                     latestTab.desktopMode ||
                     viewModel.tabRuntime.value[latestTab.id]?.isDesktopMode == true
                 if (isStoreOrDesktop) {
-                    view?.let { BrowserViewModel.applyDesktopUserAgent(it, true) }
-                    viewModel.enableDesktopModeForTab(latestTab.id)
-                    if (urlStr.contains("chromewebstore.google.com") || urlStr.contains("chrome.google.com/webstore")) {
+                    if (view?.settings?.userAgentString != BrowserViewModel.DESKTOP_USER_AGENT) {
+                        view?.let { BrowserViewModel.applyDesktopUserAgent(it, true) }
+                    }
+                    if (!latestTab.desktopMode) {
+                        viewModel.enableDesktopModeForTab(latestTab.id)
+                    }
+                    if (isStoreUrl && (urlStr.contains("chromewebstore.google.com") || urlStr.contains("chrome.google.com/webstore"))) {
                         onChromeWebStoreDetected()
                     }
                 }
@@ -426,16 +436,18 @@ fun BrowserWebViewContainer(
                             viewModel.triggerWebsiteWarning(latestTab.id, syncThreat, latestTab.isIncognito)
                             return true
                         }
-                        val previousUrl = latestTab.url
-                        val isRedirectFlag = request.isRedirect
-                        scope.launch {
-                            val report = viewModel.evaluateUrlSafety(
-                                url = targetUrl,
-                                isRedirect = isRedirectFlag,
-                                originalUrl = previousUrl
-                            )
-                            if (report.verdict != WebsiteVerdict.SAFE && !viewModel.consumeOneTimeAllowance(targetUrl)) {
-                                viewModel.triggerWebsiteWarning(latestTab.id, report, latestTab.isIncognito)
+                        if (request.isForMainFrame) {
+                            val previousUrl = latestTab.url
+                            val isRedirectFlag = request.isRedirect
+                            scope.launch {
+                                val report = viewModel.evaluateUrlSafety(
+                                    url = targetUrl,
+                                    isRedirect = isRedirectFlag,
+                                    originalUrl = previousUrl
+                                )
+                                if (report.verdict != WebsiteVerdict.SAFE && !viewModel.consumeOneTimeAllowance(targetUrl)) {
+                                    viewModel.triggerWebsiteWarning(latestTab.id, report, latestTab.isIncognito)
+                                }
                             }
                         }
                     }
@@ -538,7 +550,7 @@ fun BrowserWebViewContainer(
                 if (shouldDesktop) {
                     injectDesktopEnvironmentShim(view, injectViewport = true)
                 }
-                if (!isLocalPreview) {
+                if (!isLocalPreview && latestHasEnabledExtensions) {
                     val startScript = viewModel.extensionEngine.buildInjectionPayload(
                         extensions = latestExtensions,
                         url = targetUrl,
@@ -599,11 +611,12 @@ fun BrowserWebViewContainer(
                     )
                 }
                 viewModel.onPageCommitted(latestTab, targetUrl, pageTitle)
-                viewModel.captureTabPreview(latestTab.id)
+                // Defer thumbnail capture briefly so Chromium finishes compositing without main-thread frame hitch
+                view?.postDelayed({ viewModel.captureTabPreview(latestTab.id) }, 450L)
 
                 // Inject Cosmetic AdBlock CSS
                 val pageHost = BrowserViewModel.extractHost(targetUrl)
-                val siteAdBlock = latestPermissions.firstOrNull { it.originHost == pageHost }?.adBlockEnabled ?: true
+                val siteAdBlock = latestPermByHost[pageHost]?.adBlockEnabled ?: true
                 val cosmeticCss = viewModel.adBlock.buildCosmeticCss(siteAdBlock)
                 if (cosmeticCss.isNotBlank()) {
                     val cssJs = """
@@ -617,7 +630,7 @@ fun BrowserWebViewContainer(
                 }
 
                 // Inject matching WebExtensions & UserScripts (document_end) — never into local HTML previews
-                if (!pageHost.equals(WeblioDownloadManager.LOCAL_PREVIEW_HOST, ignoreCase = true)) {
+                if (latestHasEnabledExtensions && !pageHost.equals(WeblioDownloadManager.LOCAL_PREVIEW_HOST, ignoreCase = true)) {
                     val endScript = viewModel.extensionEngine.buildInjectionPayload(
                         extensions = latestExtensions,
                         url = targetUrl,
@@ -973,23 +986,13 @@ fun BrowserWebViewContainer(
         runCatching {
             webView.onResume()
             webView.resumeTimers()
-            if (viewModel.consumeWebViewCacheClear(webView)) {
-                webView.clearCache(true)
-            }
         }
 
-        onDispose {
-            if (viewModel.tabRuntime.value[latestTab.id]?.isLoading != true) {
-                viewModel.captureTabPreview(latestTab.id)
-            }
-        }
+        onDispose { }
     }
 
     LaunchedEffect(tab.id, tab.url, webViewInstanceVersion, errorBanner) {
         if (errorBanner == null && viewModel.shouldDispatchInitialLoad(tab.id, tab.url, webView)) {
-            if (viewModel.consumeWebViewCacheClear(webView)) {
-                runCatching { webView.clearCache(true) }
-            }
             if (tab.desktopMode || settings.desktopModeDefault || ExtensionEngine.isExtensionStoreUrl(tab.url)) {
                 BrowserViewModel.applyDesktopUserAgent(webView, true, forceInitialScale = true)
             }
@@ -1161,6 +1164,7 @@ private fun configureWebSettings(
     sitePermission: SitePermissionEntity? = null
 ) {
     val ws = webView.settings
+    ws.cacheMode = WebSettings.LOAD_DEFAULT
     ws.javaScriptEnabled = settings.javascriptEnabled && (sitePermission?.javascriptEnabled ?: true)
     ws.domStorageEnabled = !isIncognito
     ws.databaseEnabled = !isIncognito
@@ -1177,6 +1181,9 @@ private fun configureWebSettings(
     ws.allowUniversalAccessFromFileURLs = false
     ws.mixedContentMode = WebSettings.MIXED_CONTENT_NEVER_ALLOW
     ws.setSupportMultipleWindows(true)
+    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+        runCatching { webView.setRendererPriorityPolicy(WebView.RENDERER_PRIORITY_IMPORTANT, true) }
+    }
 
     if (WebViewFeature.isFeatureSupported(WebViewFeature.SAFE_BROWSING_ENABLE)) {
         WebSettingsCompat.setSafeBrowsingEnabled(ws, settings.safeBrowsingEnabled)
