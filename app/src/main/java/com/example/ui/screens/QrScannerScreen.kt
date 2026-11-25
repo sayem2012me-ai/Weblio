@@ -104,8 +104,14 @@ fun QrScannerScreen(
             }
         } else {
             val executor = remember { Executors.newSingleThreadExecutor() }
+            val qrReader = remember { MultiFormatReader() }
+            var boundCameraProvider by remember { mutableStateOf<ProcessCameraProvider?>(null) }
             DisposableEffect(Unit) {
-                onDispose { executor.shutdown() }
+                onDispose {
+                    runCatching { boundCameraProvider?.unbindAll() }
+                    boundCameraProvider = null
+                    runCatching { executor.shutdownNow() }
+                }
             }
 
             Box(
@@ -119,7 +125,9 @@ fun QrScannerScreen(
                         val previewView = PreviewView(ctx)
                         val cameraProviderFuture = ProcessCameraProvider.getInstance(ctx)
                         cameraProviderFuture.addListener({
+                            if (executor.isShutdown) return@addListener
                             val provider = cameraProviderFuture.get()
+                            boundCameraProvider = provider
                             val preview = Preview.Builder().build().also {
                                 it.surfaceProvider = previewView.surfaceProvider
                             }
@@ -129,7 +137,7 @@ fun QrScannerScreen(
                                 .also { imgAnalysis ->
                                     imgAnalysis.setAnalyzer(executor) { imageProxy ->
                                         if (!decodedOnce) {
-                                            decodeQrFromProxy(imageProxy)?.let { result ->
+                                            decodeQrFromProxy(imageProxy, qrReader)?.let { result ->
                                                 decodedOnce = true
                                                 previewView.post { onQrDecoded(result) }
                                             }
@@ -148,6 +156,9 @@ fun QrScannerScreen(
                             }
                         }, ContextCompat.getMainExecutor(ctx))
                         previewView
+                    },
+                    onRelease = {
+                        runCatching { boundCameraProvider?.unbindAll() }
                     }
                 )
             }
@@ -155,7 +166,7 @@ fun QrScannerScreen(
     }
 }
 
-private fun decodeQrFromProxy(image: ImageProxy): String? {
+private fun decodeQrFromProxy(image: ImageProxy, reader: MultiFormatReader): String? {
     val plane = image.planes.firstOrNull() ?: return null
     val buffer = plane.buffer
     val bytes = ByteArray(buffer.remaining())
@@ -171,5 +182,7 @@ private fun decodeQrFromProxy(image: ImageProxy): String? {
         false
     )
     val bitmap = BinaryBitmap(HybridBinarizer(source))
-    return runCatching { MultiFormatReader().decode(bitmap).text }.getOrNull()
+    return runCatching { reader.decodeWithState(bitmap).text }
+        .also { runCatching { reader.reset() } }
+        .getOrNull()
 }

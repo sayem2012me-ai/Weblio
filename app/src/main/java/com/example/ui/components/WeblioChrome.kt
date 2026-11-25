@@ -1018,7 +1018,7 @@ fun ExtensionPopupDialog(
                     val rootDir = runCatching { File(extension.installPath).canonicalFile }.getOrNull()
                     val isConfined = extBaseDir != null && rootDir != null &&
                         rootDir.path.startsWith(extBaseDir.path.trimEnd(File.separatorChar) + File.separatorChar)
-                    val safePopupFile = if (isConfined && rootDir != null) {
+                    val safePopupFile = if (isConfined) {
                         ExtensionEngine.resolveConfinedFile(rootDir, extension.popupPath)
                     } else null
 
@@ -1110,7 +1110,7 @@ fun ExtensionPopupDialog(
                                             val resp = loader.shouldInterceptRequest(uri) ?: return null
                                             val path = uri.path.orEmpty().lowercase()
                                             if (extensionEngine != null && (path.endsWith(".html") || path.endsWith(".htm"))) {
-                                                val rawBytes = runCatching { resp.data.readBytes() }.getOrNull()
+                                                val rawBytes = runCatching { resp.data.use { it.readBytes() } }.getOrNull()
                                                 if (rawBytes != null) {
                                                     val wrapped = extensionEngine.injectPopupChromeRuntimeHtml(
                                                         rawHtmlBytes = rawBytes,
@@ -1142,6 +1142,15 @@ fun ExtensionPopupDialog(
                                         }
                                     }
                                     loadUrl("https://ext.weblio.local/$relPopupPath")
+                                }
+                            },
+                            onRelease = { wv ->
+                                runCatching {
+                                    wv.stopLoading()
+                                    wv.webChromeClient = null
+                                    (wv.parent as? android.view.ViewGroup)?.removeView(wv)
+                                    wv.removeAllViews()
+                                    wv.destroy()
                                 }
                             }
                         )

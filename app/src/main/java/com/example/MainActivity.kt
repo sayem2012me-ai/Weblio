@@ -297,7 +297,6 @@ private fun WeblioAppRoot(
     val activeProfile by viewModel.activeProfile.collectAsState()
     val tabs by viewModel.tabs.collectAsState()
     val activeTab by viewModel.activeTab.collectAsState()
-    val tabRuntimeMap by viewModel.tabRuntime.collectAsState()
     val quickLinks by viewModel.quickLinks.collectAsState()
     val extensions by viewModel.extensions.collectAsState()
     val sitePermissions by viewModel.sitePermissions.collectAsState()
@@ -383,6 +382,7 @@ private fun WeblioAppRoot(
 
         composable<WeblioRoute.Browser> {
             val currentTab = activeTab
+            val tabRuntimeMap by viewModel.tabRuntime.collectAsState()
             val runtime = currentTab?.let { tabRuntimeMap[it.id] }
             val currentUrl = runtime?.currentUrl ?: currentTab?.url ?: "weblio://home"
             val isHome = currentUrl == "weblio://home"
@@ -745,6 +745,7 @@ private fun WeblioAppRoot(
             LaunchedEffect(Unit) { viewModel.ensureTabPreviewsLoaded() }
             val closedTabs by viewModel.closedTabs.collectAsState()
             val tabPreviews by viewModel.tabPreviews.collectAsState()
+            val tabRuntimeMap by viewModel.tabRuntime.collectAsState()
             TabsScreen(
                 tabs = tabs,
                 closedTabs = closedTabs,
@@ -1055,7 +1056,8 @@ private fun WeblioAppRoot(
 
     activeExtensionPopup?.let { ext ->
         val popupTab = activeTab
-        val popupRuntime = popupTab?.let { tabRuntimeMap[it.id] }
+        val popupRuntimeMap by viewModel.tabRuntime.collectAsState()
+        val popupRuntime = popupTab?.let { popupRuntimeMap[it.id] }
         val popupUrl = popupRuntime?.currentUrl ?: popupTab?.url ?: "weblio://home"
         val popupTitle = popupRuntime?.title ?: popupTab?.title ?: "New Tab"
         ExtensionPopupDialog(

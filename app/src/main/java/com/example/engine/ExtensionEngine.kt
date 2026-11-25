@@ -155,7 +155,7 @@ class ExtensionEngine(
     }
 
     fun cleanupExtensionFiles(ext: ExtensionEntity) {
-        val path = ext.installPath ?: return
+        val path = ext.installPath
         if (path.isBlank()) return
         runCatching {
             val dir = File(path).canonicalFile

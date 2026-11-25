@@ -806,6 +806,17 @@ fun BrowserWebViewContainer(
                     this.settings.allowContentAccess = false
                     this.settings.mixedContentMode = WebSettings.MIXED_CONTENT_NEVER_ALLOW
                 }
+                var tempDestroyed = false
+                fun destroyTempWebView() {
+                    if (tempDestroyed) return
+                    tempDestroyed = true
+                    runCatching {
+                        tempWebView.stopLoading()
+                        (tempWebView.parent as? ViewGroup)?.removeView(tempWebView)
+                        tempWebView.removeAllViews()
+                        tempWebView.destroy()
+                    }
+                }
                 tempWebView.webViewClient = object : WebViewClient() {
                     private var handled = false
                     override fun shouldOverrideUrlLoading(v: WebView?, req: WebResourceRequest?): Boolean {
@@ -820,7 +831,7 @@ fun BrowserWebViewContainer(
                                 desktopModeOverride = inheritDesktopBase || ExtensionEngine.isExtensionStoreUrl(target)
                             )
                         }
-                        tempWebView.destroy()
+                        destroyTempWebView()
                         return true
                     }
 
@@ -835,20 +846,18 @@ fun BrowserWebViewContainer(
                                 desktopModeOverride = inheritDesktopBase || ExtensionEngine.isExtensionStoreUrl(url)
                             )
                         }
-                        tempWebView.stopLoading()
-                        tempWebView.destroy()
+                        destroyTempWebView()
                     }
 
                     override fun onRenderProcessGone(
                         v: WebView?,
                         detail: RenderProcessGoneDetail?
                     ): Boolean {
-                        tempWebView.stopLoading()
-                        (tempWebView.parent as? ViewGroup)?.removeView(tempWebView)
-                        tempWebView.destroy()
+                        destroyTempWebView()
                         return true
                     }
                 }
+                tempWebView.postDelayed({ destroyTempWebView() }, 10_000L)
                 transport.webView = tempWebView
                 resultMsg.sendToTarget()
                 return true
