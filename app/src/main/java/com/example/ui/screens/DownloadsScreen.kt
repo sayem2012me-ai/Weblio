@@ -198,8 +198,10 @@ fun DownloadsScreen(
     }
     val usedBytes = remember(downloads) {
         downloads.sumOf { item ->
-            val diskLen = runCatching { File(item.localPath).takeIf { it.exists() }?.length() ?: 0L }.getOrDefault(0L)
-            maxOf(diskLen, item.downloadedBytes.coerceAtLeast(0L))
+            maxOf(
+                item.downloadedBytes.coerceAtLeast(0L),
+                if (item.status == DownloadStatus.COMPLETED.name) item.totalBytes.coerceAtLeast(0L) else 0L
+            )
         }
     }
 
@@ -319,7 +321,7 @@ fun DownloadsScreen(
         ) {
             item(key = "storage_header") {
                 val storageSummary = if (totalDeviceBytes > 0L) {
-                    "Using ${formatStorageBytes(usedBytes)} of ${formatStorageCapacity(totalDeviceBytes)}"
+                    "Using ${formatStorageBytes(usedBytes)} of ${formatStorageCapacity(totalDeviceBytes)} • $downloadLocationLabel"
                 } else {
                     "Using ${formatStorageBytes(usedBytes)} • $downloadLocationLabel"
                 }
@@ -382,7 +384,7 @@ fun DownloadsScreen(
                             )
                             Spacer(Modifier.height(4.dp))
                             Text(
-                                text = "Images, archives, PDFs, and media downloaded in WEBLIO appear here.",
+                                text = "Images, archives, PDFs, and media downloaded in Weblo appear here.",
                                 style = MaterialTheme.typography.bodySmall,
                                 color = MaterialTheme.colorScheme.onSurfaceVariant
                             )
@@ -833,7 +835,8 @@ private fun DownloadImageGridTile(
     ) {
         SubcomposeAsyncImage(
             model = ImageRequest.Builder(context)
-                .data(File(item.localPath))
+                .data(item.imageModelData())
+                .size(360)
                 .crossfade(true)
                 .build(),
             contentDescription = item.fileName,
@@ -917,7 +920,8 @@ private fun FeaturedImageDownloadCard(
             ) {
                 SubcomposeAsyncImage(
                     model = ImageRequest.Builder(context)
-                        .data(File(item.localPath))
+                        .data(item.imageModelData())
+                        .size(720)
                         .crossfade(true)
                         .build(),
                     contentDescription = item.fileName,
@@ -1247,6 +1251,15 @@ private fun handleOpenDownload(
     }.onFailure {
         onShowMessage(it.message ?: "File unavailable")
     }
+}
+
+private fun DownloadEntity.imageModelData(): Any {
+    val uriStr = publicUri
+    if (!uriStr.isNullOrBlank()) {
+        val parsed = runCatching { Uri.parse(uriStr) }.getOrNull()
+        if (parsed != null && parsed.scheme == "content") return parsed
+    }
+    return File(localPath)
 }
 
 private fun DownloadEntity.isImageDownload(): Boolean {

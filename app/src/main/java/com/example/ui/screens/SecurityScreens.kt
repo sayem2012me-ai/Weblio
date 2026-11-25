@@ -143,7 +143,7 @@ fun DangerousWebsiteWarningScreen(
             Spacer(Modifier.height(12.dp))
 
             Text(
-                text = "WEBLIO Security Protection has detected a potential threat. This website may attempt to steal your information, install malicious software, or compromise your privacy.",
+                text = "Weblo Security Protection has detected a potential threat. This website may attempt to steal your information, install malicious software, or compromise your privacy.",
                 style = MaterialTheme.typography.bodyLarge,
                 color = Color.White.copy(alpha = 0.94f)
             )
@@ -225,7 +225,7 @@ fun DangerousWebsiteWarningScreen(
             title = { Text("Proceed to Unverified Site?") },
             text = {
                 Text(
-                    "Visiting ${report.host.ifBlank { report.url }} may expose passwords, cookies, or trigger malicious downloads. WEBLIO will allow this single navigation only and will NOT whitelist this site."
+                    "Visiting ${report.host.ifBlank { report.url }} may expose passwords, cookies, or trigger malicious downloads. Weblo will allow this single navigation only and will NOT whitelist this site."
                 )
             },
             confirmButton = {
@@ -295,7 +295,7 @@ fun DownloadSecurityDecisionDialog(
                         modifier = Modifier.fillMaxWidth()
                     ) {
                         Text(
-                            text = "DANGER: This file is isolated in WEBLIO private quarantine and has NOT been placed in Downloads or executed.",
+                            text = "DANGER: This file is isolated in Weblo private quarantine and has NOT been placed in Downloads or executed.",
                             style = MaterialTheme.typography.bodySmall.copy(fontWeight = FontWeight.SemiBold),
                             color = WeblioDanger,
                             modifier = Modifier.padding(10.dp)
@@ -367,7 +367,7 @@ fun DownloadSecurityDecisionDialog(
             text = {
                 Text(
                     "\"${report.fileName}\" matched critical threat indicators (${report.threatCategory ?: "Malware/Tampered"}).\n\n" +
-                        "Even if saved, WEBLIO will keep it flagged as Dangerous (User Overridden) and will never auto-execute it. Save anyway?"
+                        "Even if saved, Weblo will keep it flagged as Dangerous (User Overridden) and will never auto-execute it. Save anyway?"
                 )
             },
             confirmButton = {
@@ -445,7 +445,7 @@ fun SecurityCenterScreen(
         contentWindowInsets = WindowInsets.safeDrawing,
         topBar = {
             TopAppBar(
-                title = { Text("WEBLIO Security Center") },
+                title = { Text("Weblo Security Center") },
                 navigationIcon = {
                     IconButton(onClick = onBack) {
                         Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "Back")
@@ -831,7 +831,7 @@ private fun VerifyUpdatePackageDialog(
     var selectedUri by remember { mutableStateOf<Uri?>(null) }
     var metadataJson by remember {
         mutableStateOf(
-            """{"versionCode":2,"versionName":"1.1.0","downloadUrl":"https://updates.weblio.example/weblio.apk","sha256":"<64-hex-sha256>","signerSha256":""}"""
+            """{"versionCode":2,"versionName":"1.1.0","downloadUrl":"https://updates.weblo.example/weblo.apk","sha256":"<64-hex-sha256>","signerSha256":""}"""
         )
     }
     var resultText by remember { mutableStateOf<String?>(null) }

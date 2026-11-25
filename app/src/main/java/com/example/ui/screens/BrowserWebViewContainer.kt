@@ -17,6 +17,7 @@ import android.webkit.JavascriptInterface
 import android.webkit.JsPromptResult
 import android.webkit.JsResult
 import android.webkit.PermissionRequest
+import android.webkit.RenderProcessGoneDetail
 import android.webkit.SslErrorHandler
 import android.webkit.URLUtil
 import android.webkit.ValueCallback
@@ -34,10 +35,25 @@ import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.Close
+import androidx.compose.material.icons.filled.Refresh
+import androidx.compose.material.icons.filled.Warning
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
+import androidx.compose.material3.Icon
+import androidx.compose.material3.IconButton
+import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
+import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
@@ -49,9 +65,13 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
+import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.toArgb
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.testTag
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.viewinterop.AndroidView
 import androidx.core.content.ContextCompat
@@ -100,7 +120,9 @@ fun BrowserWebViewContainer(
     viewModel: BrowserViewModel,
     onChromeWebStoreDetected: () -> Unit,
     onFullscreenVideoChanged: (View?) -> Unit,
-    modifier: Modifier = Modifier
+    modifier: Modifier = Modifier,
+    webViewInstanceVersion: Int = 0,
+    errorBanner: String? = null
 ) {
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
@@ -201,8 +223,10 @@ fun BrowserWebViewContainer(
 
     val nativeBridgeToken = remember(tab.id, activeProfile?.id) { UUID.randomUUID().toString() }
 
-    val webView = remember(tab.id, activeProfile?.id) {
+    val webViewBackgroundArgb = androidx.compose.material3.MaterialTheme.colorScheme.background.toArgb()
+    val webView = remember(tab.id, activeProfile?.id, webViewInstanceVersion) {
         viewModel.getWebView(tab.id) ?: WebView(context).apply {
+            setBackgroundColor(webViewBackgroundArgb)
             layoutParams = ViewGroup.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT,
                 ViewGroup.LayoutParams.MATCH_PARENT
@@ -286,6 +310,11 @@ fun BrowserWebViewContainer(
                                         context.startService(svc)
                                     }
                                 }
+                            } else {
+                                val stopSvc = Intent(context, WeblioMediaService::class.java).apply {
+                                    action = WeblioMediaService.ACTION_STOP
+                                }
+                                runCatching { context.startService(stopSvc) }
                             }
                         }
                     }
@@ -296,18 +325,31 @@ fun BrowserWebViewContainer(
         }
     }
 
-    // Sync live settings onto WebView
-    LaunchedEffect(settings, tab.desktopMode, tab.url, sitePermissions) {
+    // Sync only WebView-relevant settings so unrelated counter increments (e.g. blocked count) don't re-apply settings
+    LaunchedEffect(
+        settings.javascriptEnabled,
+        settings.safeBrowsingEnabled,
+        settings.forceDarkWebPages,
+        settings.hardwareAccelerationEnabled,
+        settings.desktopModeDefault,
+        settings.cookiePolicy,
+        tab.desktopMode,
+        tab.url,
+        sitePermissions
+    ) {
         val pageHost = BrowserViewModel.extractHost(tab.url)
         val sitePerm = sitePermissions.firstOrNull { it.originHost == pageHost }
         val useDesktop = tab.desktopMode || (sitePerm?.desktopMode == true) || ExtensionEngine.isExtensionStoreUrl(tab.url)
         configureWebSettings(webView, settings, useDesktop, tab.isIncognito, sitePerm)
     }
 
-    var lastZoomFitUrl by remember(tab.id) { mutableStateOf<String?>(null) }
+    var lastZoomFitUrl by remember(tab.id, webViewInstanceVersion) { mutableStateOf<String?>(null) }
 
     // Attach dynamic clients that read latest state
-    DisposableEffect(tab.id) {
+    DisposableEffect(tab.id, webView) {
+        var lastReportedProgress = -1
+        var desktopShimInjectedInProgress = false
+
         webView.webViewClient = object : WebViewClient() {
             override fun shouldInterceptRequest(
                 view: WebView?,
@@ -330,7 +372,7 @@ fun BrowserWebViewContainer(
                     return interceptLocalDownloadPreview(
                         uri = uri,
                         assetLoader = localDownloadsAssetLoader,
-                        downloads = viewModel.downloads.value,
+                        resolveDownloadById = { id -> viewModel.resolveDownloadForPreview(id) },
                         downloadsRoot = viewModel.downloadManager.quarantineManager.downloadsDir
                     )
                 }
@@ -373,6 +415,9 @@ fun BrowserWebViewContainer(
                         if (h.isNotBlank() && h != "localhost" && !h.startsWith("127.") && !h.startsWith("192.168.") && !h.startsWith("10.")) {
                             targetUrl = "https://" + targetUrl.removePrefix("http://").removePrefix("HTTP://")
                         }
+                    }
+                    if (request.isForMainFrame && latestSettings.safeSearchEnabled) {
+                        targetUrl = com.example.data.prefs.SearchEngine.enforceSafeSearchOnUrl(targetUrl, true)
                     }
 
                     if (latestSettings.safeBrowsingEnabled) {
@@ -469,6 +514,8 @@ fun BrowserWebViewContainer(
                     view.loadUrl(targetUrl)
                     return
                 }
+                lastReportedProgress = -1
+                desktopShimInjectedInProgress = false
                 if (lastZoomFitUrl != targetUrl) {
                     lastZoomFitUrl = null
                 }
@@ -552,10 +599,6 @@ fun BrowserWebViewContainer(
                 }
                 viewModel.onPageCommitted(latestTab, targetUrl, pageTitle)
                 viewModel.captureTabPreview(latestTab.id)
-                scope.launch {
-                    kotlinx.coroutines.delay(450)
-                    viewModel.captureTabPreview(latestTab.id)
-                }
 
                 // Inject Cosmetic AdBlock CSS
                 val pageHost = BrowserViewModel.extractHost(targetUrl)
@@ -671,14 +714,37 @@ fun BrowserWebViewContainer(
                     )
                 }
             }
+
+            override fun onRenderProcessGone(
+                view: WebView?,
+                detail: RenderProcessGoneDetail?
+            ): Boolean {
+                val didCrash = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                    detail?.didCrash() ?: true
+                } else {
+                    true
+                }
+                view?.let { dead ->
+                    dead.stopLoading()
+                    dead.webChromeClient = null
+                    (dead.parent as? ViewGroup)?.removeView(dead)
+                    dead.destroy()
+                }
+                viewModel.handleRendererProcessGone(latestTab.id, view, didCrash)
+                return true
+            }
         }
 
         webView.webChromeClient = object : WebChromeClient() {
             override fun onProgressChanged(view: WebView?, newProgress: Int) {
-                viewModel.updateRuntimeState(tab.id) {
-                    it.copy(progress = newProgress, isLoading = newProgress < 100)
+                if (newProgress == 100 || newProgress <= 10 || kotlin.math.abs(newProgress - lastReportedProgress) >= 5) {
+                    lastReportedProgress = newProgress
+                    viewModel.updateRuntimeState(tab.id) {
+                        it.copy(progress = newProgress, isLoading = newProgress < 100)
+                    }
                 }
-                if (newProgress in 10..95) {
+                if (!desktopShimInjectedInProgress && newProgress in 15..95) {
+                    desktopShimInjectedInProgress = true
                     val urlNow = view?.url.orEmpty()
                     val isDesktopNow = latestTab.desktopMode ||
                         viewModel.tabRuntime.value[latestTab.id]?.isDesktopMode == true ||
@@ -757,6 +823,16 @@ fun BrowserWebViewContainer(
                         }
                         tempWebView.stopLoading()
                         tempWebView.destroy()
+                    }
+
+                    override fun onRenderProcessGone(
+                        v: WebView?,
+                        detail: RenderProcessGoneDetail?
+                    ): Boolean {
+                        tempWebView.stopLoading()
+                        (tempWebView.parent as? ViewGroup)?.removeView(tempWebView)
+                        tempWebView.destroy()
+                        return true
                     }
                 }
                 transport.webView = tempWebView
@@ -900,8 +976,8 @@ fun BrowserWebViewContainer(
         }
     }
 
-    LaunchedEffect(tab.id, tab.url) {
-        if (viewModel.shouldDispatchInitialLoad(tab.id, tab.url, webView)) {
+    LaunchedEffect(tab.id, tab.url, webViewInstanceVersion, errorBanner) {
+        if (errorBanner == null && viewModel.shouldDispatchInitialLoad(tab.id, tab.url, webView)) {
             if (tab.desktopMode || settings.desktopModeDefault || ExtensionEngine.isExtensionStoreUrl(tab.url)) {
                 BrowserViewModel.applyDesktopUserAgent(webView, true, forceInitialScale = true)
             }
@@ -926,6 +1002,64 @@ fun BrowserWebViewContainer(
             },
             modifier = Modifier.fillMaxSize()
         )
+        if (!errorBanner.isNullOrBlank()) {
+            Surface(
+                color = MaterialTheme.colorScheme.errorContainer,
+                shape = RoundedCornerShape(14.dp),
+                shadowElevation = 4.dp,
+                modifier = Modifier
+                    .align(Alignment.TopCenter)
+                    .fillMaxWidth()
+                    .padding(12.dp)
+                    .testTag("webview_error_banner")
+            ) {
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(horizontal = 12.dp, vertical = 8.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Icon(
+                        imageVector = Icons.Filled.Warning,
+                        contentDescription = null,
+                        tint = MaterialTheme.colorScheme.onErrorContainer,
+                        modifier = Modifier.size(18.dp)
+                    )
+                    Spacer(Modifier.width(8.dp))
+                    Text(
+                        text = errorBanner,
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onErrorContainer,
+                        maxLines = 2,
+                        overflow = TextOverflow.Ellipsis,
+                        modifier = Modifier.weight(1f)
+                    )
+                    TextButton(
+                        onClick = { viewModel.retryTabLoad(tab.id) },
+                        modifier = Modifier.testTag("webview_error_reload_button")
+                    ) {
+                        Icon(
+                            imageVector = Icons.Filled.Refresh,
+                            contentDescription = "Reload",
+                            modifier = Modifier.size(16.dp)
+                        )
+                        Spacer(Modifier.width(4.dp))
+                        Text("Reload")
+                    }
+                    IconButton(
+                        onClick = { viewModel.dismissTabErrorBanner(tab.id) },
+                        modifier = Modifier.size(48.dp)
+                    ) {
+                        Icon(
+                            imageVector = Icons.Filled.Close,
+                            contentDescription = "Dismiss",
+                            tint = MaterialTheme.colorScheme.onErrorContainer,
+                            modifier = Modifier.size(16.dp)
+                        )
+                    }
+                }
+            }
+        }
     }
 
     siteOriginPrompt?.let { prompt ->
@@ -1041,7 +1175,7 @@ private fun configureWebSettings(
     if (!settings.hardwareAccelerationEnabled) {
         webView.setLayerType(View.LAYER_TYPE_SOFTWARE, null)
     } else {
-        webView.setLayerType(View.LAYER_TYPE_HARDWARE, null)
+        webView.setLayerType(View.LAYER_TYPE_NONE, null)
     }
 
     BrowserViewModel.applyDesktopUserAgent(webView, desktopMode || settings.desktopModeDefault)
@@ -1167,6 +1301,9 @@ private fun injectCoreBrowserHelpers(
                     el.addEventListener('pause', function() {
                         if (window.WeblioNative) window.WeblioNative.onMediaStateChanged(__NATIVE_TOKEN__, false, document.title || location.hostname);
                     });
+                    el.addEventListener('ended', function() {
+                        if (window.WeblioNative) window.WeblioNative.onMediaStateChanged(__NATIVE_TOKEN__, false, document.title || location.hostname);
+                    });
                 };
                 document.querySelectorAll('video, audio').forEach(bindMedia);
             }
@@ -1199,7 +1336,7 @@ private fun injectCoreBrowserHelpers(
 private fun interceptLocalDownloadPreview(
     uri: Uri,
     assetLoader: WebViewAssetLoader,
-    downloads: List<com.example.data.db.DownloadEntity>,
+    resolveDownloadById: (Long) -> com.example.data.db.DownloadEntity?,
     downloadsRoot: File
 ): WebResourceResponse? {
     val rawPath = uri.path.orEmpty()
@@ -1209,8 +1346,8 @@ private fun interceptLocalDownloadPreview(
     if (rawPath.startsWith("/__id/")) {
         val downloadId = uri.pathSegments.getOrNull(1)?.toLongOrNull()
         val entity = downloadId?.let { id ->
-            downloads.firstOrNull {
-                it.id == id && !it.quarantined && it.status == DownloadStatus.COMPLETED.name
+            resolveDownloadById(id)?.takeIf {
+                !it.quarantined && it.status == DownloadStatus.COMPLETED.name
             }
         }
         val file = entity?.let { runCatching { File(it.localPath).canonicalFile }.getOrNull() }

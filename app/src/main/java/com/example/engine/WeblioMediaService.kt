@@ -52,7 +52,7 @@ class WeblioMediaService : Service() {
             return START_NOT_STICKY
         }
 
-        val title = intent?.getStringExtra(EXTRA_TITLE) ?: "WEBLIO Media"
+        val title = intent?.getStringExtra(EXTRA_TITLE) ?: "Weblo Media"
         val host = intent?.getStringExtra(EXTRA_HOST) ?: "Playing in background"
         val isPlaying = intent?.getBooleanExtra(EXTRA_IS_PLAYING, true) ?: true
 
@@ -86,7 +86,7 @@ class WeblioMediaService : Service() {
         val nm = getSystemService(NotificationManager::class.java)
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
             nm.createNotificationChannel(
-                NotificationChannel(CHANNEL_ID, "WEBLIO Media Playback", NotificationManager.IMPORTANCE_LOW)
+                NotificationChannel(CHANNEL_ID, "Weblo Media Playback", NotificationManager.IMPORTANCE_LOW)
             )
         }
 

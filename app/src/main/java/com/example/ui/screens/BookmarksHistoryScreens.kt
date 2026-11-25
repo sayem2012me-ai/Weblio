@@ -138,7 +138,7 @@ fun BookmarksScreen(
                     IconButton(onClick = { importLauncher.launch(arrayOf("text/html", "*/*")) }) {
                         Icon(Icons.Filled.FileUpload, contentDescription = "Import bookmarks HTML")
                     }
-                    IconButton(onClick = { exportLauncher.launch("weblio_bookmarks.html") }) {
+                    IconButton(onClick = { exportLauncher.launch("weblo_bookmarks.html") }) {
                         Icon(Icons.Filled.FileDownload, contentDescription = "Export bookmarks HTML")
                     }
                 }

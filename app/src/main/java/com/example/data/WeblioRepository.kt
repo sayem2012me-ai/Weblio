@@ -78,7 +78,6 @@ class WeblioRepository(private val db: WeblioDatabase) {
         listOf(personalId, workId, guestId).forEach { pid ->
             seedDefaultQuickLinksForProfile(pid)
         }
-        seedDefaultBookmarks(personalId)
         seedDefaultExtensions(personalId)
         seedDefaultAdBlockIfNeeded()
         return personalId
@@ -97,11 +96,10 @@ class WeblioRepository(private val db: WeblioDatabase) {
         defaults.forEach { quickLinkDao.insert(it) }
     }
 
-    private suspend fun seedDefaultBookmarks(profileId: Long) {
-        if (bookmarkDao.getOnce(profileId).isNotEmpty()) return
-        bookmarkDao.insert(BookmarkEntity(profileId = profileId, title = "Wikipedia", url = "https://www.wikipedia.org", folder = "Knowledge"))
-        bookmarkDao.insert(BookmarkEntity(profileId = profileId, title = "MDN Web Docs", url = "https://developer.mozilla.org", folder = "Developer"))
-        bookmarkDao.insert(BookmarkEntity(profileId = profileId, title = "PrivacyTests.org", url = "https://privacytests.org", folder = "Privacy"))
+    suspend fun pruneLegacyDefaultBookmarks(profileId: Long) {
+        bookmarkDao.deleteByUrlAndFolder(profileId, "https://www.wikipedia.org", "Knowledge")
+        bookmarkDao.deleteByUrlAndFolder(profileId, "https://developer.mozilla.org", "Developer")
+        bookmarkDao.deleteByUrlAndFolder(profileId, "https://privacytests.org", "Privacy")
     }
 
     private suspend fun seedDefaultExtensions(profileId: Long) {
@@ -152,7 +150,7 @@ class WeblioRepository(private val db: WeblioDatabase) {
             "||demdex.net^",
             "||omtrdc.net^"
         ).map {
-            AdBlockRuleEntity(pattern = it, ruleType = FilterRuleType.NETWORK_BLOCK.name, sourceList = "WEBLIO Core EasyList", enabled = true)
+            AdBlockRuleEntity(pattern = it, ruleType = FilterRuleType.NETWORK_BLOCK.name, sourceList = "Weblo Core EasyList", enabled = true)
         }
         val cosmeticRules = listOf(
             "##.adsbygoogle",
@@ -163,7 +161,7 @@ class WeblioRepository(private val db: WeblioDatabase) {
             "##.taboola-widget",
             "##.outbrain-widget"
         ).map {
-            AdBlockRuleEntity(pattern = it, ruleType = FilterRuleType.COSMETIC_HIDE.name, sourceList = "WEBLIO Cosmetic Shield", enabled = true)
+            AdBlockRuleEntity(pattern = it, ruleType = FilterRuleType.COSMETIC_HIDE.name, sourceList = "Weblo Cosmetic Shield", enabled = true)
         }
         val dnsRules = listOf(
             "doubleclick.net",
@@ -175,7 +173,7 @@ class WeblioRepository(private val db: WeblioDatabase) {
             "metrics.icloud.com",
             "app-measurement.com"
         ).map {
-            AdBlockRuleEntity(pattern = it, ruleType = FilterRuleType.DNS_BLOCK.name, sourceList = "WEBLIO DNS Blocklist", enabled = true)
+            AdBlockRuleEntity(pattern = it, ruleType = FilterRuleType.DNS_BLOCK.name, sourceList = "Weblo DNS Blocklist", enabled = true)
         }
         adBlockDao.insertRules(coreRules + cosmeticRules + dnsRules)
 
@@ -228,7 +226,7 @@ class WeblioRepository(private val db: WeblioDatabase) {
                     filter: invert(100%) hue-rotate(180deg) !important;
                 }
             """.trimIndent(),
-            scriptContent = "/* Dark Reader WEBLIO CSS Engine active */"
+            scriptContent = "/* Dark Reader Weblo CSS Engine active */"
         ),
         ExtensionEntity(
             profileId = profileId,
@@ -294,7 +292,7 @@ class WeblioRepository(private val db: WeblioDatabase) {
             extId = "weblio.bitwarden.bridge",
             name = "Bitwarden / Vault Autofill Bridge",
             version = "2025.2-weblio",
-            description = "Detects login forms and fills credentials securely from WEBLIO Keystore Vault.",
+            description = "Detects login forms and fills credentials securely from Weblo Keystore Vault.",
             sourceType = "BUILTIN_ENGINE",
             enabled = true,
             permissionsJson = "[\"activeTab\",\"storage\"]",
@@ -559,6 +557,7 @@ class WeblioRepository(private val db: WeblioDatabase) {
     suspend fun deleteSubscription(sub: FilterSubscriptionEntity) = adBlockDao.deleteSubscription(sub)
     suspend fun getSubscriptionsOnce(): List<FilterSubscriptionEntity> = adBlockDao.getSubscriptionsOnce()
     suspend fun incrementRuleHit(ruleId: Long) = adBlockDao.incrementHit(ruleId)
+    suspend fun incrementRuleHitsBy(ruleId: Long, delta: Long) = adBlockDao.incrementHitBy(ruleId, delta)
 
     // Site Permissions
     suspend fun getSitePermission(profileId: Long, host: String): SitePermissionEntity? = sitePermissionDao.getForHost(profileId, host)

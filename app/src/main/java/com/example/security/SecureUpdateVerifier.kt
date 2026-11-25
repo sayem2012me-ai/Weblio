@@ -117,7 +117,7 @@ class SecureUpdateVerifier(private val context: Context) {
                 downgradeBlocked = false,
                 sha256Verified = true,
                 signatureVerified = false,
-                reason = "Update APK signing certificate does not match trusted WEBLIO signature."
+                reason = "Update APK signing certificate does not match trusted Weblo signature."
             )
         }
 

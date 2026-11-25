@@ -629,7 +629,7 @@ private fun TabPreviewCard(
                             verticalArrangement = Arrangement.Center
                         ) {
                             Text(
-                                text = "WEBLIO",
+                                text = "Weblo",
                                 color = MaterialTheme.colorScheme.onBackground,
                                 fontSize = 14.sp,
                                 fontWeight = FontWeight.Bold,

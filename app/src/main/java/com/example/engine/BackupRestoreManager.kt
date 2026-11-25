@@ -206,7 +206,7 @@ class BackupRestoreManager(
         val sb = StringBuilder()
         sb.append("<!DOCTYPE NETSCAPE-Bookmark-file-1>\n")
         sb.append("<META HTTP-EQUIV=\"Content-Type\" CONTENT=\"text/html; charset=UTF-8\">\n")
-        sb.append("<TITLE>WEBLIO Bookmarks</TITLE>\n<H1>WEBLIO Bookmarks</H1>\n<DL><p>\n")
+        sb.append("<TITLE>Weblo Bookmarks</TITLE>\n<H1>Weblo Bookmarks</H1>\n<DL><p>\n")
         bookmarks.groupBy { it.folder }.forEach { (folder, items) ->
             sb.append("  <DT><H3>").append(escapeHtml(folder)).append("</H3>\n  <DL><p>\n")
             items.forEach { bm ->

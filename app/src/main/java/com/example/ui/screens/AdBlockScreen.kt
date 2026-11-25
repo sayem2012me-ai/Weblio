@@ -414,7 +414,7 @@ fun AdBlockScreen(
             title = { Text("Enable Local DNS Shield?") },
             text = {
                 Text(
-                    "Android allows only one active VPN service at a time. Enabling WEBLIO's local DNS shield will disconnect any other active VPN app. All filtering stays 100% local on your device."
+                    "Android allows only one active VPN service at a time. Enabling Weblo's local DNS shield will disconnect any other active VPN app. All filtering stays 100% local on your device."
                 )
             },
             confirmButton = {

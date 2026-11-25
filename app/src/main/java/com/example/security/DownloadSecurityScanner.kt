@@ -82,6 +82,11 @@ class DownloadSecurityScanner(
         var hasEicarSignature = false
         var hasSuspiciousScriptPayload = false
         var hasPdfActiveAction = false
+        val ext = fileName.substringAfterLast('.', "").lowercase()
+        var earlyMagic: MagicResult? = null
+        var scanTextWindow = false
+        var scanScriptRegex = false
+        var scanPdfActions = false
 
         var tailOverlap = ""
         BufferedInputStream(FileInputStream(file), CHUNK_SIZE).use { input ->
@@ -94,27 +99,37 @@ class DownloadSecurityScanner(
                     val toCopy = minOf(read, headerBuf.size - headerLen)
                     System.arraycopy(buffer, 0, headerBuf, headerLen, toCopy)
                     headerLen += toCopy
+                    if (headerLen >= 16 || read < CHUNK_SIZE) {
+                        val hdr = headerBuf.copyOf(headerLen)
+                        val m = detectMagicType(hdr, fileName)
+                        earlyMagic = m
+                        val isBinaryMediaOrArchive = m.kind in BINARY_MEDIA_OR_ARCHIVE_KINDS
+                        scanTextWindow = !isBinaryMediaOrArchive && actualBytes <= MAX_TEXT_SCAN_BYTES
+                        scanScriptRegex = scanTextWindow && ext !in SAFE_CODE_EXTENSIONS && m.kind != MagicKind.PDF
+                        scanPdfActions = (ext == "pdf" || m.kind == MagicKind.PDF) && actualBytes <= MAX_PDF_ACTION_SCAN_BYTES
+                    }
                 }
 
-                // Chunked ASCII/text window scan for EICAR / script payload indicators (bounded RAM)
-                val chunkText = tailOverlap + String(buffer, 0, read, Charsets.ISO_8859_1)
-                if (chunkText.contains(EICAR_TEST_SIGNATURE)) {
-                    hasEicarSignature = true
+                // Only run string/regex scans on bounded non-media files (never peg CPU on MP4/JPG/MP3 streams)
+                if (scanTextWindow || scanPdfActions || actualBytes <= MAX_EICAR_SCAN_BYTES) {
+                    val chunkText = tailOverlap + String(buffer, 0, read, Charsets.ISO_8859_1)
+                    if (actualBytes <= MAX_EICAR_SCAN_BYTES && chunkText.contains(EICAR_TEST_SIGNATURE)) {
+                        hasEicarSignature = true
+                    }
+                    if (scanScriptRegex && !hasSuspiciousScriptPayload && SUSPICIOUS_SCRIPT_PATTERNS.any { it.containsMatchIn(chunkText) }) {
+                        hasSuspiciousScriptPayload = true
+                    }
+                    if (scanPdfActions && !hasPdfActiveAction && PDF_DANGEROUS_ACTIONS.any { chunkText.contains(it) }) {
+                        hasPdfActiveAction = true
+                    }
+                    tailOverlap = if (chunkText.length > 128) chunkText.takeLast(128) else chunkText
                 }
-                if (SUSPICIOUS_SCRIPT_PATTERNS.any { it.containsMatchIn(chunkText) }) {
-                    hasSuspiciousScriptPayload = true
-                }
-                if (PDF_DANGEROUS_ACTIONS.any { chunkText.contains(it) }) {
-                    hasPdfActiveAction = true
-                }
-                tailOverlap = if (chunkText.length > 128) chunkText.takeLast(128) else chunkText
             }
         }
 
         val sha256 = digest.digest().joinToString("") { "%02x".format(it) }
         val header = headerBuf.copyOf(headerLen)
-        val detectedMagic = detectMagicType(header, fileName)
-        val ext = fileName.substringAfterLast('.', "").lowercase()
+        val detectedMagic = earlyMagic ?: detectMagicType(header, fileName)
         val findings = mutableListOf<String>()
 
         // 1. Known Malware Hash Database (EICAR + bundled + Room cached hashes)
@@ -302,7 +317,7 @@ class DownloadSecurityScanner(
             expectedBytes = expectedBytes,
             threatCategory = null,
             detectionReason = "No known threats detected.",
-            recommendation = "Safe to open from WEBLIO Downloads.",
+            recommendation = "Safe to open from Weblo Downloads.",
             findings = findings + listOf(
                 "File signature verified: ${detectedMagic.label}",
                 "SHA-256: ${sha256.take(16)}..."
@@ -425,9 +440,23 @@ class DownloadSecurityScanner(
     data class MagicResult(val kind: MagicKind, val label: String)
 
     companion object {
-        private const val CHUNK_SIZE = 16 * 1024
+        private const val CHUNK_SIZE = 64 * 1024
         private const val MAX_ZIP_ENTRIES = 5000
         private const val MAX_ZIP_UNCOMPRESSED_BYTES = 512L * 1024 * 1024
+        private const val MAX_TEXT_SCAN_BYTES = 10L * 1024 * 1024
+        private const val MAX_EICAR_SCAN_BYTES = 1024L * 1024
+        private const val MAX_PDF_ACTION_SCAN_BYTES = 25L * 1024 * 1024
+        private val BINARY_MEDIA_OR_ARCHIVE_KINDS = setOf(
+            MagicKind.JPEG,
+            MagicKind.PNG,
+            MagicKind.GIF,
+            MagicKind.WEBP,
+            MagicKind.MP4,
+            MagicKind.MP3,
+            MagicKind.OGG,
+            MagicKind.WAV,
+            MagicKind.ZIP
+        )
 
         // Standard non-malicious EICAR antivirus test string & its SHA-256
         const val EICAR_TEST_SIGNATURE =

@@ -102,7 +102,8 @@ data class DownloadEntity(
     val threatReason: String? = null,
     val scanSummary: String? = null,
     val userOverridden: Boolean = false,
-    val quarantined: Boolean = false
+    val quarantined: Boolean = false,
+    val publicUri: String? = null
 )
 
 @Entity(
@@ -172,7 +173,7 @@ data class AdBlockRuleEntity(
     @PrimaryKey(autoGenerate = true) val id: Long = 0,
     val pattern: String,
     val ruleType: String = FilterRuleType.NETWORK_BLOCK.name,
-    val sourceList: String = "WEBLIO Core Shield",
+    val sourceList: String = "Weblo Core Shield",
     val enabled: Boolean = true,
     val hitCount: Long = 0L
 )

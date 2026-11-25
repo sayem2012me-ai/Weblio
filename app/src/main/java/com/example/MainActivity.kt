@@ -75,6 +75,7 @@ import androidx.fragment.app.FragmentActivity
 import androidx.navigation.compose.NavHost
 import androidx.navigation.compose.composable
 import androidx.navigation.compose.rememberNavController
+import androidx.navigation.toRoute
 import com.example.data.db.DownloadStatus
 import com.example.engine.ExtensionEngine
 import com.example.engine.WeblioDnsVpnService
@@ -106,6 +107,7 @@ import com.example.ui.screens.MainMenuBottomSheet
 import com.example.ui.screens.PasswordManagerScreen
 import com.example.ui.screens.ProfilesScreen
 import com.example.ui.screens.QrScannerScreen
+import com.example.ui.screens.SearchScreen
 import com.example.ui.screens.SecurityCenterScreen
 import com.example.ui.screens.SettingsScreen
 import com.example.ui.screens.SitePermissionsScreen
@@ -137,7 +139,7 @@ class MainActivity : FragmentActivity() {
                         errorMessage = lockErrorMessage,
                         onUnlockRequested = {
                             authenticateWithBiometrics(
-                                title = "Unlock WEBLIO Browser",
+                                title = "Unlock Weblo Browser",
                                 subtitle = "Verify your identity to access your browser session",
                                 onSuccess = {
                                     lockErrorMessage = null
@@ -242,7 +244,7 @@ private fun AppLockGateScreen(
             Column(horizontalAlignment = Alignment.CenterHorizontally) {
                 Icon(Icons.Filled.Lock, contentDescription = null, tint = WeblioCyan, modifier = Modifier.size(64.dp))
                 Spacer(Modifier.height(14.dp))
-                Text("WEBLIO Locked", style = MaterialTheme.typography.headlineMedium)
+                Text("Weblo Locked", style = MaterialTheme.typography.headlineMedium)
                 if (!errorMessage.isNullOrBlank()) {
                     Spacer(Modifier.height(8.dp))
                     Text(
@@ -276,18 +278,10 @@ private fun WeblioAppRoot(
     val profiles by viewModel.profiles.collectAsState()
     val activeProfile by viewModel.activeProfile.collectAsState()
     val tabs by viewModel.tabs.collectAsState()
-    val closedTabs by viewModel.closedTabs.collectAsState()
     val activeTab by viewModel.activeTab.collectAsState()
     val tabRuntimeMap by viewModel.tabRuntime.collectAsState()
-    val tabPreviews by viewModel.tabPreviews.collectAsState()
-    val bookmarks by viewModel.bookmarks.collectAsState()
-    val history by viewModel.history.collectAsState()
-    val downloads by viewModel.downloads.collectAsState()
-    val passwords by viewModel.passwords.collectAsState()
     val quickLinks by viewModel.quickLinks.collectAsState()
     val extensions by viewModel.extensions.collectAsState()
-    val adBlockRules by viewModel.adBlockRules.collectAsState()
-    val subscriptions by viewModel.filterSubscriptions.collectAsState()
     val sitePermissions by viewModel.sitePermissions.collectAsState()
     val sessionBlockedCount by viewModel.adBlock.sessionBlockedCount.collectAsState()
     val recentBlocked by viewModel.adBlock.recentBlocked.collectAsState()
@@ -302,7 +296,7 @@ private fun WeblioAppRoot(
     val snackbarMsg by viewModel.snackbarMessage.collectAsState()
     val vaultUnlocked by viewModel.isPasswordVaultUnlocked.collectAsState()
 
-    val securityEvents by viewModel.securityEvents.collectAsState()
+    val quarantineSecurityFlags by viewModel.quarantineSecurityFlags.collectAsState()
     val pendingQuarantineReviews by viewModel.pendingQuarantineReviews.collectAsState()
     val pendingWebsiteWarning by viewModel.pendingWebsiteWarning.collectAsState()
     val appIntegrityReport by viewModel.appIntegrityReport.collectAsState()
@@ -313,7 +307,7 @@ private fun WeblioAppRoot(
     val overallSecurityState = remember(
         appIntegrityReport,
         settings,
-        downloads,
+        quarantineSecurityFlags,
         extensions,
         pendingWebsiteWarning
     ) {
@@ -340,7 +334,7 @@ private fun WeblioAppRoot(
         val intent = Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH).apply {
             putExtra(RecognizerIntent.EXTRA_LANGUAGE_MODEL, RecognizerIntent.LANGUAGE_MODEL_WEB_SEARCH)
             putExtra(RecognizerIntent.EXTRA_LANGUAGE, Locale.getDefault())
-            putExtra(RecognizerIntent.EXTRA_PROMPT, "Speak to search with WEBLIO")
+            putExtra(RecognizerIntent.EXTRA_PROMPT, "Speak to search with Weblo")
         }
         runCatching { voiceLauncher.launch(intent) }
             .onFailure { viewModel.showMessage("Voice recognition service unavailable on this device") }
@@ -356,7 +350,7 @@ private fun WeblioAppRoot(
 
     NavHost(
         navController = navController,
-        startDestination = WeblioRoute.Splash
+        startDestination = WeblioRoute.Browser
     ) {
         composable<WeblioRoute.Splash> {
             SplashScreen(
@@ -375,7 +369,10 @@ private fun WeblioAppRoot(
             val isHome = currentUrl == "weblio://home"
             val host = BrowserViewModel.extractHost(currentUrl)
             val siteAdBlock = sitePermissions.firstOrNull { it.originHost == host }?.adBlockEnabled ?: true
-            val isBookmarked = bookmarks.any { it.url == currentUrl }
+            val browserBookmarks by viewModel.bookmarks.collectAsState()
+            val isBookmarked = remember(browserBookmarks, currentUrl) {
+                browserBookmarks.any { it.url == currentUrl }
+            }
 
             BackHandler(enabled = !isHome) {
                 viewModel.webViewGoBack()
@@ -435,6 +432,11 @@ private fun WeblioAppRoot(
                                         onVoiceClick = { launchVoiceSearch() },
                                         onExtensionsClick = { showExtensionsPopup = true },
                                         onShieldClick = { navController.navigate(WeblioRoute.SecurityCenter) { launchSingleTop = true } },
+                                        onOpenSearchPage = { query ->
+                                            navController.navigate(WeblioRoute.Search(initialQuery = query)) {
+                                                launchSingleTop = true
+                                            }
+                                        },
                                         modifier = Modifier.weight(1f)
                                     )
                                     Spacer(Modifier.width(4.dp))
@@ -524,7 +526,10 @@ private fun WeblioAppRoot(
                                 onAdBlockClick = { navController.navigate(WeblioRoute.AdBlock) { launchSingleTop = true } },
                                 onProfileClick = { navController.navigate(WeblioRoute.Profiles) { launchSingleTop = true } },
                                 onAddQuickLink = { t, u -> viewModel.addQuickLink(t, u) },
-                                onDeleteQuickLink = { viewModel.deleteQuickLink(it) }
+                                onDeleteQuickLink = { viewModel.deleteQuickLink(it) },
+                                onSearchBarClick = {
+                                    navController.navigate(WeblioRoute.Search()) { launchSingleTop = true }
+                                }
                             )
                         } else {
                             val storeExtRef = remember(currentUrl) {
@@ -585,7 +590,7 @@ private fun WeblioAppRoot(
                                                 }
                                                 Spacer(Modifier.width(6.dp))
                                                 Text(
-                                                    text = if (isInstallingExtension) "Installing..." else "Add to WEBLIO",
+                                                    text = if (isInstallingExtension) "Installing..." else "Add to Weblo",
                                                     maxLines = 1
                                                 )
                                             }
@@ -607,10 +612,12 @@ private fun WeblioAppRoot(
                                     onChromeWebStoreDetected = {
                                         if (!hasShownCwsTip) {
                                             hasShownCwsTip = true
-                                            viewModel.showMessage("Desktop view enabled for extension store. Open any extension and tap 'Add to WEBLIO'.")
+                                            viewModel.showMessage("Desktop view enabled for extension store. Open any extension and tap 'Add to Weblo'.")
                                         }
                                     },
                                     onFullscreenVideoChanged = { fullscreenVideoView = it },
+                                    webViewInstanceVersion = runtime?.webViewInstanceVersion ?: 0,
+                                    errorBanner = runtime?.errorBanner,
                                     modifier = Modifier
                                         .weight(1f)
                                         .fillMaxWidth()
@@ -658,7 +665,7 @@ private fun WeblioAppRoot(
                             }
                             context.startActivity(Intent(Settings.ACTION_MANAGE_DEFAULT_APPS_SETTINGS))
                         }.onFailure {
-                            viewModel.showMessage("Open system Default Apps settings to set WEBLIO as default browser")
+                            viewModel.showMessage("Open system Default Apps settings to set Weblo as default browser")
                         }
                     },
                     onOpenSecurityCenter = {
@@ -697,7 +704,7 @@ private fun WeblioAppRoot(
                         context.startActivity(Intent.createChooser(share, "Share link via"))
                     },
                     onCopyLink = {
-                        viewModel.copyToClipboard(currentUrl, isSensitive = false, label = "WEBLIO Link")
+                        viewModel.copyToClipboard(currentUrl, isSensitive = false, label = "Weblo Link")
                         viewModel.showMessage(if (settings.clipboardGuardEnabled) "Link copied (Clipboard Guard active)" else "Link copied")
                     },
                     onToggleSiteAdBlock = { viewModel.toggleSiteAdBlock(host) },
@@ -709,6 +716,8 @@ private fun WeblioAppRoot(
         }
 
         composable<WeblioRoute.Tabs> {
+            val closedTabs by viewModel.closedTabs.collectAsState()
+            val tabPreviews by viewModel.tabPreviews.collectAsState()
             TabsScreen(
                 tabs = tabs,
                 closedTabs = closedTabs,
@@ -727,6 +736,7 @@ private fun WeblioAppRoot(
         }
 
         composable<WeblioRoute.Bookmarks> {
+            val bookmarks by viewModel.bookmarks.collectAsState()
             BookmarksScreen(
                 bookmarks = bookmarks,
                 onOpenUrl = { viewModel.openUrlInActiveTab(it) },
@@ -741,6 +751,7 @@ private fun WeblioAppRoot(
         }
 
         composable<WeblioRoute.History> {
+            val history by viewModel.history.collectAsState()
             HistoryScreen(
                 history = history,
                 onOpenUrl = { viewModel.openUrlInActiveTab(it) },
@@ -751,6 +762,7 @@ private fun WeblioAppRoot(
         }
 
         composable<WeblioRoute.Downloads> {
+            val downloads by viewModel.downloads.collectAsState()
             DownloadsScreen(
                 downloads = downloads,
                 downloadLocationLabel = settings.downloadLocationLabel,
@@ -802,6 +814,8 @@ private fun WeblioAppRoot(
         }
 
         composable<WeblioRoute.AdBlock> {
+            val adBlockRules by viewModel.adBlockRules.collectAsState()
+            val subscriptions by viewModel.filterSubscriptions.collectAsState()
             AdBlockScreen(
                 settings = settings,
                 sessionBlockedCount = sessionBlockedCount,
@@ -841,6 +855,7 @@ private fun WeblioAppRoot(
         }
 
         composable<WeblioRoute.Passwords> {
+            val passwords by viewModel.passwords.collectAsState()
             DisposableEffect(Unit) {
                 onDispose { viewModel.setPasswordVaultUnlocked(false) }
             }
@@ -861,7 +876,7 @@ private fun WeblioAppRoot(
                 onShowMessage = { viewModel.showMessage(it) },
                 onBack = { navController.popBackStack() },
                 onCopyPassword = { secret ->
-                    viewModel.copyToClipboard(secret, isSensitive = true, label = "WEBLIO Password")
+                    viewModel.copyToClipboard(secret, isSensitive = true, label = "Weblo Password")
                 }
             )
         }
@@ -881,8 +896,10 @@ private fun WeblioAppRoot(
         }
 
         composable<WeblioRoute.SecurityCenter> {
-            val quarantinedList = remember(downloads) {
-                downloads.filter { it.status == DownloadStatus.QUARANTINED.name || it.quarantined }
+            val secDownloads by viewModel.downloads.collectAsState()
+            val securityEvents by viewModel.securityEvents.collectAsState()
+            val quarantinedList = remember(secDownloads) {
+                secDownloads.filter { it.status == DownloadStatus.QUARANTINED.name || it.quarantined }
             }
             SecurityCenterScreen(
                 overallState = overallSecurityState,
@@ -928,6 +945,39 @@ private fun WeblioAppRoot(
                     viewModel.openUrlInActiveTab(text)
                     navController.popBackStack()
                 },
+                onBack = { navController.popBackStack() }
+            )
+        }
+
+        composable<WeblioRoute.Search> { backStackEntry ->
+            val route = backStackEntry.toRoute<WeblioRoute.Search>()
+            val suggestions by viewModel.searchSuggestions.collectAsState()
+            val isLoadingSuggestions by viewModel.isLoadingSuggestions.collectAsState()
+            val searchHistory by viewModel.history.collectAsState()
+            val searchBookmarks by viewModel.bookmarks.collectAsState()
+            SearchScreen(
+                initialQuery = route.initialQuery,
+                searchEngine = settings.defaultSearchEngine,
+                isIncognito = activeTab?.isIncognito == true,
+                suggestions = suggestions,
+                isLoadingSuggestions = isLoadingSuggestions,
+                history = searchHistory,
+                bookmarks = searchBookmarks,
+                onQueryChange = { q -> viewModel.updateSearchQuery(q, settings.defaultSearchEngine) },
+                onSelectSearchEngine = { engine -> viewModel.setSearchEngine(engine) },
+                onSubmitQuery = { query ->
+                    viewModel.clearSearchSuggestions()
+                    navController.popBackStack()
+                    viewModel.openUrlInActiveTab(query)
+                },
+                onQrClick = {
+                    navController.navigate(WeblioRoute.QrScanner) { launchSingleTop = true }
+                },
+                onVoiceClick = {
+                    navController.popBackStack()
+                    launchVoiceSearch()
+                },
+                onClearSuggestions = { viewModel.clearSearchSuggestions() },
                 onBack = { navController.popBackStack() }
             )
         }
@@ -1025,7 +1075,7 @@ private fun WeblioAppRoot(
             title = { Text("Chrome Web Store Compatibility") },
             text = {
                 Text(
-                    "Android System WebView does not natively support 1-click Chrome Web Store .crx installation. To use extensions in WEBLIO, import compatible .zip/.crx bundles or .user.js scripts inside the Extensions Manager, or enable WEBLIO's verified Dark Reader, uBlock, Privacy Badger, and Tampermonkey engines."
+                    "Android System WebView does not natively support 1-click Chrome Web Store .crx installation. To use extensions in Weblo, import compatible .zip/.crx bundles or .user.js scripts inside the Extensions Manager, or enable Weblo's verified Dark Reader, uBlock, Privacy Badger, and Tampermonkey engines."
                 )
             },
             confirmButton = {

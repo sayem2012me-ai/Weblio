@@ -8,10 +8,12 @@ import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.test.performClick
 import androidx.compose.ui.test.performScrollTo
 import androidx.compose.ui.test.performTextInput
+import androidx.compose.ui.test.assertTextContains
 import com.example.data.db.DownloadEntity
 import com.example.data.db.DownloadFileCategory
 import com.example.data.db.DownloadStatus
 import com.example.data.db.ExtensionEntity
+import com.example.data.db.HistoryEntity
 import com.example.data.db.ProfileEntity
 import com.example.data.db.QuickLinkEntity
 import com.example.data.db.TabEntity
@@ -27,6 +29,7 @@ import com.example.ui.screens.ExtensionsQuickPopup
 import com.example.ui.screens.ExtensionsScreen
 import com.example.ui.screens.HomeScreen
 import com.example.ui.screens.MainMenuBottomSheet
+import com.example.ui.screens.SearchScreen
 import com.example.ui.screens.TabsScreen
 import com.example.ui.theme.AppThemeMode
 import com.example.ui.theme.WeblioGrayBg
@@ -78,7 +81,7 @@ class WeblioComposeUiTest {
         }
 
         composeRule.waitForIdle()
-        composeRule.onNodeWithText("WEBLIO").assertIsDisplayed()
+        composeRule.onNodeWithText("Weblo").assertIsDisplayed()
         composeRule.onNodeWithText("EXPLORE. DISCOVER. EXPERIENCE.").assertIsDisplayed()
         composeRule.onNodeWithText("12 blocked").assertIsDisplayed()
 
@@ -587,5 +590,103 @@ class WeblioComposeUiTest {
         composeRule.onNodeWithTag("popup_dialog_enable_btn").assertIsDisplayed().performClick()
         composeRule.waitForIdle()
         assertEquals(1, toggledCount)
+    }
+
+    @Test
+    fun homeScreen_searchBarClickTriggersFullScreenSearchCallback() {
+        var searchBarClicked = false
+
+        composeRule.setContent {
+            WeblioTheme {
+                HomeScreen(
+                    settings = BrowserSettings(),
+                    activeProfile = ProfileEntity(id = 1, name = "Personal", iconKey = "person"),
+                    quickLinks = emptyList(),
+                    isIncognito = false,
+                    sessionBlockedCount = 0L,
+                    onNavigateUrl = {},
+                    onSelectSearchEngine = {},
+                    onQrClick = {},
+                    onVoiceClick = {},
+                    onExtensionsClick = {},
+                    onBookmarksClick = {},
+                    onHistoryClick = {},
+                    onAdBlockClick = {},
+                    onProfileClick = {},
+                    onAddQuickLink = { _, _ -> },
+                    onDeleteQuickLink = {},
+                    onSearchBarClick = { searchBarClicked = true }
+                )
+            }
+        }
+
+        composeRule.waitForIdle()
+        composeRule.onNodeWithTag("address_input_field").performClick()
+        composeRule.waitForIdle()
+        assertTrue(searchBarClicked)
+    }
+
+    @Test
+    fun searchScreen_rendersSuggestionsHandlesFillArrowClearCloseAndEngineSwitch() {
+        var submitted: String? = null
+        var selectedEngine: SearchEngine? = null
+        var backCalled = false
+        val history = listOf(
+            HistoryEntity(id = 1L, profileId = 1L, title = "Search Console Help", url = "https://search.google.com")
+        )
+        val suggestions = listOf("search", "search history", "search console")
+
+        composeRule.setContent {
+            WeblioTheme {
+                SearchScreen(
+                    initialQuery = "sesr",
+                    searchEngine = SearchEngine.GOOGLE,
+                    isIncognito = false,
+                    suggestions = suggestions,
+                    isLoadingSuggestions = false,
+                    history = history,
+                    bookmarks = emptyList(),
+                    onQueryChange = {},
+                    onSelectSearchEngine = { selectedEngine = it },
+                    onSubmitQuery = { submitted = it },
+                    onQrClick = {},
+                    onVoiceClick = {},
+                    onClearSuggestions = {},
+                    onBack = { backCalled = true }
+                )
+            }
+        }
+
+        composeRule.waitForIdle()
+        composeRule.onNodeWithTag("search_screen_root").assertIsDisplayed()
+        composeRule.onNodeWithTag("search_direct_query_row").assertIsDisplayed()
+        composeRule.onNodeWithText("search history").assertIsDisplayed()
+
+        // Tap '+' to reveal quick search engine switcher and switch to Brave
+        composeRule.onNodeWithTag("search_plus_button").performClick()
+        composeRule.waitForIdle()
+        composeRule.onNodeWithText("Brave").performClick()
+        composeRule.waitForIdle()
+        assertEquals(SearchEngine.BRAVE, selectedEngine)
+
+        // Tap fill arrow (↖) on the first autocomplete suggestion row (index 1 -> "search")
+        // Verify input updates without submitting
+        composeRule.onNodeWithTag("search_fill_arrow_1").performClick()
+        composeRule.waitForIdle()
+        composeRule.onNodeWithTag("search_page_input").assertTextContains("search")
+        assertEquals(null, submitted)
+
+        // Tap row to submit query
+        composeRule.onNodeWithTag("search_suggestion_row_2").performClick()
+        composeRule.waitForIdle()
+        assertEquals("search history", submitted)
+
+        // Tap X to clear non-empty input, then tap X again to close search page
+        composeRule.onNodeWithTag("search_clear_close_button").performClick()
+        composeRule.waitForIdle()
+        assertEquals(false, backCalled)
+        composeRule.onNodeWithTag("search_clear_close_button").performClick()
+        composeRule.waitForIdle()
+        assertTrue(backCalled)
     }
 }

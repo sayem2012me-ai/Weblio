@@ -22,6 +22,6 @@ dependencyResolutionManagement {
   }
 }
 
-rootProject.name = "WEBLIO Browser"
+rootProject.name = "Weblo Browser"
 
 include(":app")

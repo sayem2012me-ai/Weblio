@@ -52,14 +52,14 @@ class WeblioDnsVpnService : VpnService() {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
             val channel = NotificationChannel(
                 CHANNEL_ID,
-                "WEBLIO DNS Shield",
+                "Weblo DNS Shield",
                 NotificationManager.IMPORTANCE_LOW
             )
             nm.createNotificationChannel(channel)
         }
         val notif = NotificationCompat.Builder(this, CHANNEL_ID)
             .setSmallIcon(R.mipmap.ic_launcher)
-            .setContentTitle("WEBLIO DNS Shield Active")
+            .setContentTitle("Weblo DNS Shield Active")
             .setContentText("Filtering ad and tracker DNS queries locally")
             .setOngoing(true)
             .build()
@@ -69,7 +69,7 @@ class WeblioDnsVpnService : VpnService() {
     private fun startVpnTunnel() {
         if (vpnInterface != null) return
         val builder = Builder()
-            .setSession("WEBLIO Local DNS Shield")
+            .setSession("Weblo Local DNS Shield")
             .addAddress("10.111.222.1", 32)
             .addDnsServer("10.111.222.2")
             .addRoute("10.111.222.2", 32)

@@ -25,7 +25,6 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.example.R
-import com.example.ui.components.WeblioLogoMark
 import com.example.ui.theme.WeblioGrayBg
 import com.example.ui.theme.WeblioSlateText
 import com.example.ui.theme.WeblioWhite
@@ -57,13 +56,11 @@ fun SplashScreen(onFinished: () -> Unit) {
                 .alpha(alpha.value)
                 .padding(32.dp)
         ) {
-            WeblioLogoMark(size = 104.dp)
-            Spacer(modifier = Modifier.height(22.dp))
             Text(
-                text = "WEBLIO",
+                text = "Weblo",
                 style = MaterialTheme.typography.displayLarge.copy(
                     fontWeight = FontWeight.Bold,
-                    letterSpacing = 5.sp
+                    letterSpacing = 3.sp
                 ),
                 color = WeblioWhite
             )

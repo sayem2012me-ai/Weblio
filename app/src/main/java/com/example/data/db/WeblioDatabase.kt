@@ -24,7 +24,7 @@ import androidx.sqlite.db.SupportSQLiteDatabase
         SecurityEventEntity::class,
         ThreatIndicatorEntity::class
     ],
-    version = 2,
+    version = 3,
     exportSchema = false
 )
 abstract class WeblioDatabase : RoomDatabase() {
@@ -92,6 +92,12 @@ abstract class WeblioDatabase : RoomDatabase() {
             }
         }
 
+        val MIGRATION_2_3 = object : Migration(2, 3) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL("ALTER TABLE downloads ADD COLUMN publicUri TEXT")
+            }
+        }
+
         fun getInstance(context: Context): WeblioDatabase {
             return INSTANCE ?: synchronized(this) {
                 INSTANCE ?: Room.databaseBuilder(
@@ -99,7 +105,7 @@ abstract class WeblioDatabase : RoomDatabase() {
                     WeblioDatabase::class.java,
                     "weblio_browser.db"
                 )
-                    .addMigrations(MIGRATION_1_2)
+                    .addMigrations(MIGRATION_1_2, MIGRATION_2_3)
                     .build()
                     .also { INSTANCE = it }
             }

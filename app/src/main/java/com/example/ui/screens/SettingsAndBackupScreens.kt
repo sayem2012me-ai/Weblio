@@ -126,6 +126,11 @@ fun SettingsScreen(
                             )
                         }
                     }
+                    SettingsSwitchRow(
+                        title = "SafeSearch (Filter Explicit Results)",
+                        checked = settings.safeSearchEnabled,
+                        switchTag = "settings_safe_search_switch"
+                    ) { viewModel.setSafeSearchEnabled(it) }
                     Spacer(Modifier.height(6.dp))
                     OutlinedTextField(
                         value = homepageDraft,
@@ -200,7 +205,7 @@ fun SettingsScreen(
             item { SettingsSectionHeader("Privacy & Security") }
             item {
                 SettingsCard {
-                    SettingsButtonRow("WEBLIO Security Center", onClick = onOpenSecurityCenter)
+                    SettingsButtonRow("Weblo Security Center", onClick = onOpenSecurityCenter)
                     SettingsButtonRow("Ad Blocker & DNS Shield", onClick = onOpenAdBlock)
                     SettingsButtonRow("Password Manager (Keystore)", onClick = onOpenPasswords)
                     SettingsButtonRow("Website Permissions Manager", onClick = onOpenSitePermissions)
@@ -387,7 +392,7 @@ fun BackupRestoreScreen(
                 SettingsSwitchRow("Include Encrypted Passwords", includePasswords) { includePasswords = it }
                 Row(horizontalArrangement = Arrangement.spacedBy(10.dp), modifier = Modifier.fillMaxWidth()) {
                     Button(
-                        onClick = { exportLauncher.launch("weblio_backup_${System.currentTimeMillis()}.weblio") },
+                        onClick = { exportLauncher.launch("weblo_backup_${System.currentTimeMillis()}.weblo") },
                         enabled = passphrase.length >= 6,
                         modifier = Modifier.weight(1f)
                     ) {
@@ -538,10 +543,19 @@ private fun SettingsCard(content: @Composable () -> Unit) {
 }
 
 @Composable
-private fun SettingsSwitchRow(title: String, checked: Boolean, onChanged: (Boolean) -> Unit) {
+private fun SettingsSwitchRow(
+    title: String,
+    checked: Boolean,
+    switchTag: String? = null,
+    onChanged: (Boolean) -> Unit
+) {
     Row(modifier = Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
         Text(title, style = MaterialTheme.typography.bodyMedium, modifier = Modifier.weight(1f))
-        Switch(checked = checked, onCheckedChange = onChanged)
+        Switch(
+            checked = checked,
+            onCheckedChange = onChanged,
+            modifier = if (switchTag != null) Modifier.testTag(switchTag) else Modifier
+        )
     }
 }
 

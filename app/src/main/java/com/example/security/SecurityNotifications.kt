@@ -19,7 +19,7 @@ object SecurityNotifications {
         SUSPICIOUS_WEBSITE(8102, "Unsafe website blocked"),
         MALICIOUS_EXTENSION(8103, "Extension security warning"),
         INTEGRITY_WARNING(8104, "Browser integrity alert"),
-        SECURITY_UPDATE_AVAILABLE(8105, "WEBLIO security update available"),
+        SECURITY_UPDATE_AVAILABLE(8105, "Weblo security update available"),
         THREAT_DB_UPDATE_FAILED(8106, "Threat database update failed"),
         REPEATED_SUSPICIOUS_ACTIVITY(8107, "Repeated suspicious activity detected")
     }
@@ -36,7 +36,7 @@ object SecurityNotifications {
             nm.createNotificationChannel(
                 NotificationChannel(
                     CHANNEL_ID,
-                    "WEBLIO Security Protection",
+                    "Weblo Security Protection",
                     NotificationManager.IMPORTANCE_HIGH
                 )
             )

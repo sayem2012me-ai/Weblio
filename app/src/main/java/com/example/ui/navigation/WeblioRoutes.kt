@@ -18,4 +18,5 @@ sealed interface WeblioRoute {
     @Serializable data object QrScanner : WeblioRoute
     @Serializable data object SitePermissions : WeblioRoute
     @Serializable data object SecurityCenter : WeblioRoute
+    @Serializable data class Search(val initialQuery: String = "") : WeblioRoute
 }

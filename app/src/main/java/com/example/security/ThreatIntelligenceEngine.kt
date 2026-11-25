@@ -76,7 +76,7 @@ class ThreatIntelligenceEngine(
                 verdict = WebsiteVerdict.DANGEROUS,
                 threatCategory = match.value,
                 reason = "Matched known ${match.value.lowercase()} indicator ($normalizedHost).",
-                source = "WEBLIO Local Threat Feed"
+                source = "Weblo Local Threat Feed"
             )
         }
 
@@ -89,7 +89,7 @@ class ThreatIntelligenceEngine(
                 verdict = WebsiteVerdict.DANGEROUS,
                 threatCategory = "Phishing / Malware Test Page",
                 reason = "Matched Safe Browsing test threat URL.",
-                source = "WEBLIO Threat Test Signature"
+                source = "Weblo Threat Test Signature"
             )
         }
 
@@ -100,7 +100,7 @@ class ThreatIntelligenceEngine(
                 verdict = WebsiteVerdict.DANGEROUS,
                 threatCategory = "Deceptive Authority / Phishing",
                 reason = "URL embeds '@$host' userinfo credentials to disguise the real destination.",
-                source = "WEBLIO Heuristic Shield"
+                source = "Weblo Heuristic Shield"
             )
         }
 
@@ -112,7 +112,7 @@ class ThreatIntelligenceEngine(
                 verdict = WebsiteVerdict.DANGEROUS,
                 threatCategory = "IDN Homograph Spoofing",
                 reason = "Internationalized punycode domain ($asciiHost) may impersonate a trusted site.",
-                source = "WEBLIO Homograph Guard"
+                source = "Weblo Homograph Guard"
             )
         }
 
@@ -123,7 +123,7 @@ class ThreatIntelligenceEngine(
                 verdict = WebsiteVerdict.DANGEROUS,
                 threatCategory = "Suspected Phishing / Fake Login",
                 reason = "Domain impersonates a major login brand on an unverified host ($normalizedHost).",
-                source = "WEBLIO Phishing Heuristics"
+                source = "Weblo Phishing Heuristics"
             )
         }
 
@@ -154,7 +154,7 @@ class ThreatIntelligenceEngine(
                 verdict = WebsiteVerdict.DANGEROUS,
                 threatCategory = bundledMatch.value,
                 reason = "Matched known ${bundledMatch.value.lowercase()} indicator ($normalizedHost).",
-                source = "WEBLIO Local Threat Feed"
+                source = "Weblo Local Threat Feed"
             )
         }
 
@@ -168,7 +168,7 @@ class ThreatIntelligenceEngine(
                 verdict = WebsiteVerdict.DANGEROUS,
                 threatCategory = "Phishing / Malware Test Page",
                 reason = "Matched Safe Browsing test threat URL.",
-                source = "WEBLIO Threat Test Signature"
+                source = "Weblo Threat Test Signature"
             )
         }
 
@@ -212,7 +212,7 @@ class ThreatIntelligenceEngine(
                 verdict = WebsiteVerdict.DANGEROUS,
                 threatCategory = "Deceptive Authority / Phishing",
                 reason = "URL embeds '@$host' userinfo credentials to disguise the real destination.",
-                source = "WEBLIO Heuristic Shield"
+                source = "Weblo Heuristic Shield"
             )
         }
 
@@ -225,7 +225,7 @@ class ThreatIntelligenceEngine(
                 verdict = WebsiteVerdict.DANGEROUS,
                 threatCategory = "IDN Homograph Spoofing",
                 reason = "Internationalized punycode domain ($asciiHost) may impersonate a trusted site.",
-                source = "WEBLIO Homograph Guard"
+                source = "Weblo Homograph Guard"
             )
         }
 
@@ -237,7 +237,7 @@ class ThreatIntelligenceEngine(
                 verdict = WebsiteVerdict.DANGEROUS,
                 threatCategory = "Suspected Phishing / Fake Login",
                 reason = "Domain impersonates a major login brand on an unverified host ($normalizedHost).",
-                source = "WEBLIO Phishing Heuristics"
+                source = "Weblo Phishing Heuristics"
             )
         }
 
@@ -252,7 +252,7 @@ class ThreatIntelligenceEngine(
                     verdict = WebsiteVerdict.DANGEROUS,
                     threatCategory = "Suspicious IP-Hosted Payload",
                     reason = "Direct IP-address URL attempting credential capture or executable delivery.",
-                    source = "WEBLIO Heuristic Shield"
+                    source = "Weblo Heuristic Shield"
                 )
             }
         }
@@ -269,7 +269,7 @@ class ThreatIntelligenceEngine(
                     verdict = WebsiteVerdict.DANGEROUS,
                     threatCategory = "Malicious Redirect Target",
                     reason = "Redirect query parameter points to a known malicious destination.",
-                    source = "WEBLIO Redirect Guard"
+                    source = "Weblo Redirect Guard"
                 )
             }
         }
@@ -283,7 +283,7 @@ class ThreatIntelligenceEngine(
                 verdict = WebsiteVerdict.SUSPICIOUS,
                 threatCategory = "Suspicious URL Shortener",
                 reason = "Shortened URL masks the final destination.",
-                source = "WEBLIO Heuristic Shield"
+                source = "Weblo Heuristic Shield"
             )
         }
 
@@ -339,7 +339,7 @@ class ThreatIntelligenceEngine(
                     indicatorType = "DOMAIN",
                     category = cat,
                     severity = "DANGEROUS",
-                    source = "WEBLIO Bundled Shield",
+                    source = "Weblo Bundled Shield",
                     updatedAt = now
                 )
             }
@@ -347,7 +347,7 @@ class ThreatIntelligenceEngine(
 
             val req = Request.Builder()
                 .url("https://urlhaus.abuse.ch/downloads/hostfile/")
-                .header("User-Agent", "WEBLIO-Security-Updater/1.0")
+                .header("User-Agent", "Weblo-Security-Updater/1.0")
                 .build()
             val added = client.newCall(req).execute().use { resp ->
                 if (!resp.isSuccessful) throw IllegalStateException("Feed HTTP ${resp.code}")

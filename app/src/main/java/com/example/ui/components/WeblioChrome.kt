@@ -185,7 +185,8 @@ fun WeblioAddressBar(
     searchEngineName: String = "Google",
     searchEngineLogoUrl: String? = null,
     onSearchEngineClick: (() -> Unit)? = null,
-    securityState: SecurityState = SecurityState.PROTECTED
+    securityState: SecurityState = SecurityState.PROTECTED,
+    onOpenSearchPage: ((String) -> Unit)? = null
 ) {
     var editing by remember(urlText) { mutableStateOf(false) }
     var draft by remember(urlText) { mutableStateOf(if (isHome) "" else urlText) }
@@ -307,18 +308,59 @@ fun WeblioAddressBar(
                 }
             }
 
-            // Editable URL/Search input
+            // URL/Search input trigger (opens dedicated full-screen Search page when onOpenSearchPage != null)
             Box(
                 modifier = Modifier
                     .weight(1f)
+                    .height(48.dp)
+                    .clip(RoundedCornerShape(20.dp))
                     .clickable {
-                        draft = if (isHome) "" else urlText
-                        editing = true
+                        if (onOpenSearchPage != null) {
+                            onOpenSearchPage(if (isHome) "" else urlText)
+                        } else {
+                            draft = if (isHome) "" else urlText
+                            editing = true
+                        }
                     }
+                    .then(if (onOpenSearchPage != null) Modifier.testTag("address_input_field") else Modifier)
                     .padding(horizontal = 6.dp),
                 contentAlignment = Alignment.CenterStart
             ) {
-                if (editing || isHome) {
+                if (onOpenSearchPage != null) {
+                    if (isHome) {
+                        Text(
+                            text = "Search $searchEngineName or type a URL",
+                            style = MaterialTheme.typography.bodyMedium,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis,
+                            modifier = Modifier.fillMaxWidth()
+                        )
+                    } else {
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            modifier = Modifier.fillMaxWidth()
+                        ) {
+                            if (isDesktopMode) {
+                                Icon(
+                                    imageVector = Icons.Filled.DesktopWindows,
+                                    contentDescription = "Desktop mode",
+                                    tint = MaterialTheme.colorScheme.primary,
+                                    modifier = Modifier
+                                        .size(14.dp)
+                                        .padding(end = 4.dp)
+                                )
+                            }
+                            Text(
+                                text = urlText.removePrefix("https://").removePrefix("http://"),
+                                style = MaterialTheme.typography.bodyMedium.copy(fontWeight = FontWeight.Medium),
+                                color = MaterialTheme.colorScheme.onSurface,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis
+                            )
+                        }
+                    }
+                } else if (editing || isHome) {
                     BasicTextField(
                         value = draft,
                         onValueChange = {
@@ -1084,6 +1126,19 @@ fun ExtensionPopupDialog(
                                                 }
                                             }
                                             return resp
+                                        }
+
+                                        override fun onRenderProcessGone(
+                                            view: WebView?,
+                                            detail: android.webkit.RenderProcessGoneDetail?
+                                        ): Boolean {
+                                            view?.let { dead ->
+                                                dead.stopLoading()
+                                                (dead.parent as? android.view.ViewGroup)?.removeView(dead)
+                                                dead.destroy()
+                                            }
+                                            onDismiss()
+                                            return true
                                         }
                                     }
                                     loadUrl("https://ext.weblio.local/$relPopupPath")

@@ -9,18 +9,21 @@ import com.example.data.db.FilterRuleType
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.update
+import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.OkHttpClient
 import okhttp3.Request
 import okhttp3.RequestBody.Companion.toRequestBody
 import java.io.ByteArrayInputStream
-import java.util.concurrent.CopyOnWriteArrayList
+import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.TimeUnit
+import java.util.concurrent.atomic.AtomicLong
 
 data class BlockedEvent(
     val url: String,
@@ -34,10 +37,27 @@ class AdBlockEngine(private val repository: WeblioRepository) {
 
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
 
-    private val networkBlockRules = CopyOnWriteArrayList<AdBlockRuleEntity>()
-    private val networkAllowRules = CopyOnWriteArrayList<AdBlockRuleEntity>()
-    private val cosmeticRules = CopyOnWriteArrayList<AdBlockRuleEntity>()
-    private val dnsBlockDomains = CopyOnWriteArrayList<String>()
+    private data class CompiledRule(
+        val entity: AdBlockRuleEntity,
+        val pathPart: String = "",
+        val regex: Regex? = null,
+        val literalNeedle: String? = null
+    )
+
+    private class RuleSnapshot(
+        val signature: Int,
+        val dnsBlockDomains: Set<String> = emptySet(),
+        val domainBlockRules: Map<String, List<CompiledRule>> = emptyMap(),
+        val generalBlockRules: List<CompiledRule> = emptyList(),
+        val domainAllowRules: Map<String, List<CompiledRule>> = emptyMap(),
+        val generalAllowRules: List<CompiledRule> = emptyList(),
+        val cosmeticCss: String = ""
+    )
+
+    @Volatile
+    private var snapshot = RuleSnapshot(signature = 0)
+
+    private val pendingRuleHits = ConcurrentHashMap<Long, AtomicLong>()
 
     private val _recentBlocked = MutableStateFlow<List<BlockedEvent>>(emptyList())
     val recentBlocked: StateFlow<List<BlockedEvent>> = _recentBlocked.asStateFlow()
@@ -63,25 +83,124 @@ class AdBlockEngine(private val repository: WeblioRepository) {
         scope.launch {
             repository.observeAdBlockRules().collect { rules ->
                 val active = rules.filter { it.enabled }
-                networkBlockRules.clear()
-                networkAllowRules.clear()
-                cosmeticRules.clear()
-                dnsBlockDomains.clear()
-                active.forEach { rule ->
-                    when (rule.ruleType) {
-                        FilterRuleType.NETWORK_BLOCK.name -> networkBlockRules.add(rule)
-                        FilterRuleType.NETWORK_ALLOW.name -> networkAllowRules.add(rule)
-                        FilterRuleType.COSMETIC_HIDE.name -> cosmeticRules.add(rule)
-                        FilterRuleType.DNS_BLOCK.name -> dnsBlockDomains.add(rule.pattern.lowercase())
-                    }
+                val sig = computeRuleStructureSignature(active)
+                if (sig != snapshot.signature || (active.isEmpty() && snapshot.signature != 0)) {
+                    snapshot = buildSnapshot(active, sig)
                 }
+            }
+        }
+        // Flush rule hit counts periodically instead of writing Room on every blocked subresource
+        scope.launch {
+            while (isActive) {
+                delay(8_000L)
+                flushRuleHits()
             }
         }
     }
 
+    private suspend fun flushRuleHits() {
+        if (pendingRuleHits.isEmpty()) return
+        val keys = pendingRuleHits.keys().toList()
+        for (ruleId in keys) {
+            val delta = pendingRuleHits[ruleId]?.getAndSet(0L) ?: 0L
+            if (delta > 0L) {
+                runCatching { repository.incrementRuleHitsBy(ruleId, delta) }
+            }
+        }
+    }
+
+    private fun computeRuleStructureSignature(active: List<AdBlockRuleEntity>): Int {
+        var h = active.size
+        for (r in active) {
+            h = 31 * h + r.id.hashCode()
+            h = 31 * h + r.pattern.hashCode()
+            h = 31 * h + r.ruleType.hashCode()
+        }
+        return h
+    }
+
+    private fun buildSnapshot(active: List<AdBlockRuleEntity>, signature: Int): RuleSnapshot {
+        val dnsSet = HashSet<String>()
+        val blockByDomain = HashMap<String, MutableList<CompiledRule>>()
+        val blockGeneral = ArrayList<CompiledRule>()
+        val allowByDomain = HashMap<String, MutableList<CompiledRule>>()
+        val allowGeneral = ArrayList<CompiledRule>()
+        val cosmeticSelectors = ArrayList<String>()
+
+        for (rule in active) {
+            when (rule.ruleType) {
+                FilterRuleType.DNS_BLOCK.name -> {
+                    val d = rule.pattern.trim().lowercase().trimEnd('.')
+                    if (d.isNotEmpty()) dnsSet.add(d)
+                }
+                FilterRuleType.NETWORK_ALLOW.name -> {
+                    indexNetworkRule(rule, allowByDomain, allowGeneral)
+                }
+                FilterRuleType.NETWORK_BLOCK.name -> {
+                    indexNetworkRule(rule, blockByDomain, blockGeneral)
+                }
+                FilterRuleType.COSMETIC_HIDE.name -> {
+                    val p = rule.pattern.trim()
+                    if (p.startsWith("##")) {
+                        val sel = p.removePrefix("##").trim()
+                        if (isSafeCosmeticSelector(sel)) cosmeticSelectors.add(sel)
+                    }
+                }
+            }
+        }
+
+        val css = if (cosmeticSelectors.isEmpty()) "" else {
+            cosmeticSelectors.joinToString(separator = ", ") +
+                " { display: none !important; visibility: hidden !important; }"
+        }
+
+        return RuleSnapshot(
+            signature = signature,
+            dnsBlockDomains = dnsSet,
+            domainBlockRules = blockByDomain,
+            generalBlockRules = blockGeneral,
+            domainAllowRules = allowByDomain,
+            generalAllowRules = allowGeneral,
+            cosmeticCss = css
+        )
+    }
+
+    private fun indexNetworkRule(
+        rule: AdBlockRuleEntity,
+        byDomain: HashMap<String, MutableList<CompiledRule>>,
+        general: ArrayList<CompiledRule>
+    ) {
+        val pattern = rule.pattern.trim()
+        if (pattern.isEmpty() || pattern.startsWith("!") || pattern.startsWith("##")) return
+        val clean = if (pattern.startsWith("@@")) pattern.removePrefix("@@") else pattern
+        if (clean.startsWith("||")) {
+            val body = clean.removePrefix("||")
+            val sep = body.indexOfAny(charArrayOf('^', '/'))
+            val domain = (if (sep >= 0) body.substring(0, sep) else body).lowercase()
+            val path = if (sep >= 0) body.substring(sep).replace("^", "") else ""
+            if (domain.isNotEmpty() && !domain.contains('*')) {
+                byDomain.getOrPut(domain) { ArrayList(2) }
+                    .add(CompiledRule(entity = rule, pathPart = path))
+                return
+            }
+        }
+        if (clean.contains("*")) {
+            val normalized = clean.replace(Regex("\\*{2,}"), "*")
+            if (normalized.count { it == '*' } <= 12) {
+                val regexStr = normalized.split('*').joinToString(".*") { Regex.escape(it) }
+                val compiled = runCatching { Regex(regexStr, RegexOption.IGNORE_CASE) }.getOrNull()
+                if (compiled != null) {
+                    general.add(CompiledRule(entity = rule, regex = compiled))
+                }
+            }
+            return
+        }
+        general.add(CompiledRule(entity = rule, literalNeedle = clean))
+    }
+
     /**
      * Real network request interception called from WebViewClient.shouldInterceptRequest.
-     * Returns an empty HTTP 204/plain response if blocked, or null to proceed normally.
+     * Uses O(1) domain lookups and precompiled patterns to keep page loading lag-free.
      */
     fun interceptRequest(
         request: WebResourceRequest,
@@ -96,11 +215,13 @@ class AdBlockEngine(private val repository: WeblioRepository) {
         // Do not block the main document navigation to the user's explicit host unless whitelisted check fails
         if (request.isForMainFrame && pageHost == reqHost) return null
 
+        val snap = snapshot
+
         // Check whitelist rules first (@@||domain.com^ or domain)
-        for (allow in networkAllowRules) {
-            if (matchesAdBlockPattern(url, reqHost, allow.pattern)) {
-                return null
-            }
+        if (matchesDomainMap(url, reqHost, snap.domainAllowRules) != null ||
+            matchesGeneralList(url, snap.generalAllowRules) != null
+        ) {
+            return null
         }
 
         // Check third-party strict blocking if enabled
@@ -115,59 +236,87 @@ class AdBlockEngine(private val repository: WeblioRepository) {
             }
         }
 
-        // Check DNS blocklist domains
-        for (domain in dnsBlockDomains) {
-            if (reqHost == domain || reqHost.endsWith(".$domain")) {
-                val event = BlockedEvent(url, reqHost, "DNS:$domain", "DNS Blocklist")
-                recordBlocked(event, null)
-                onBlocked?.invoke(event)
-                return emptyBlockedResponse()
-            }
+        // Check DNS blocklist domains (O(1) label walk)
+        val matchedDns = findMatchingDomainInSet(reqHost, snap.dnsBlockDomains)
+        if (matchedDns != null) {
+            val event = BlockedEvent(url, reqHost, "DNS:$matchedDns", "DNS Blocklist")
+            recordBlocked(event, null)
+            onBlocked?.invoke(event)
+            return emptyBlockedResponse()
         }
 
         // Check EasyList / custom network filter rules
-        for (rule in networkBlockRules) {
-            if (matchesAdBlockPattern(url, reqHost, rule.pattern)) {
-                val category = if (trackerProtectionEnabled &&
-                    (url.contains("analytics", true) || url.contains("pixel", true) || url.contains("track", true))
-                ) "Tracker" else "Ad"
-                val event = BlockedEvent(url, reqHost, rule.pattern, category)
-                recordBlocked(event, rule.id)
-                onBlocked?.invoke(event)
-                return emptyBlockedResponse()
-            }
+        val matchedRule = matchesDomainMap(url, reqHost, snap.domainBlockRules)
+            ?: matchesGeneralList(url, snap.generalBlockRules)
+        if (matchedRule != null) {
+            val category = if (trackerProtectionEnabled &&
+                (url.contains("analytics", true) || url.contains("pixel", true) || url.contains("track", true))
+            ) "Tracker" else "Ad"
+            val event = BlockedEvent(url, reqHost, matchedRule.pattern, category)
+            recordBlocked(event, matchedRule.id)
+            onBlocked?.invoke(event)
+            return emptyBlockedResponse()
         }
 
+        return null
+    }
+
+    private fun findMatchingDomainInSet(host: String, domainSet: Set<String>): String? {
+        if (domainSet.isEmpty()) return null
+        var candidate = host
+        while (true) {
+            if (candidate in domainSet) return candidate
+            val dot = candidate.indexOf('.')
+            if (dot < 0 || dot == candidate.lastIndex) break
+            candidate = candidate.substring(dot + 1)
+        }
+        return null
+    }
+
+    private fun matchesDomainMap(
+        url: String,
+        host: String,
+        domainMap: Map<String, List<CompiledRule>>
+    ): AdBlockRuleEntity? {
+        if (domainMap.isEmpty()) return null
+        var candidate = host
+        while (true) {
+            val rules = domainMap[candidate]
+            if (rules != null) {
+                for (r in rules) {
+                    if (r.pathPart.isEmpty() || url.contains(r.pathPart, ignoreCase = true)) {
+                        return r.entity
+                    }
+                }
+            }
+            val dot = candidate.indexOf('.')
+            if (dot < 0 || dot == candidate.lastIndex) break
+            candidate = candidate.substring(dot + 1)
+        }
+        return null
+    }
+
+    private fun matchesGeneralList(url: String, list: List<CompiledRule>): AdBlockRuleEntity? {
+        for (r in list) {
+            val matched = when {
+                r.regex != null -> r.regex.containsMatchIn(url)
+                r.literalNeedle != null -> url.contains(r.literalNeedle, ignoreCase = true)
+                else -> false
+            }
+            if (matched) return r.entity
+        }
         return null
     }
 
     fun isDnsDomainBlocked(domain: String): Boolean {
         val clean = domain.trim().lowercase().trimEnd('.')
         if (!globalEnabled) return false
-        return dnsBlockDomains.any { blocked -> clean == blocked || clean.endsWith(".$blocked") }
+        return findMatchingDomainInSet(clean, snapshot.dnsBlockDomains) != null
     }
 
     fun buildCosmeticCss(siteAdBlockEnabled: Boolean): String {
         if (!globalEnabled || !siteAdBlockEnabled) return ""
-        val selectors = cosmeticRules
-            .mapNotNull { rule ->
-                val p = rule.pattern.trim()
-                if (p.startsWith("##")) p.removePrefix("##").trim() else null
-            }
-            .filter { sel ->
-                sel.isNotBlank() &&
-                    sel.length <= 240 &&
-                    !sel.contains('{') &&
-                    !sel.contains('}') &&
-                    !sel.contains(';') &&
-                    !sel.contains('<') &&
-                    !sel.contains('>') &&
-                    !sel.contains("@import", ignoreCase = true) &&
-                    !sel.contains("url(", ignoreCase = true) &&
-                    !sel.contains("expression(", ignoreCase = true)
-            }
-        if (selectors.isEmpty()) return ""
-        return selectors.joinToString(separator = ", ") + " { display: none !important; visibility: hidden !important; }"
+        return snapshot.cosmeticCss
     }
 
     /**
@@ -216,7 +365,7 @@ class AdBlockEngine(private val repository: WeblioRepository) {
         _sessionBlockedCount.update { it + 1 }
         _recentBlocked.update { list -> (listOf(event) + list).take(60) }
         if (ruleId != null) {
-            scope.launch { repository.incrementRuleHit(ruleId) }
+            pendingRuleHits.computeIfAbsent(ruleId) { AtomicLong(0L) }.incrementAndGet()
         }
     }
 
@@ -225,13 +374,26 @@ class AdBlockEngine(private val repository: WeblioRepository) {
             "text/plain",
             "UTF-8",
             204,
-            "Blocked by WEBLIO Shield",
+            "Blocked by Weblo Shield",
             mapOf("X-Weblio-Blocked" to "true"),
             ByteArrayInputStream(ByteArray(0))
         )
     }
 
     companion object {
+        private fun isSafeCosmeticSelector(sel: String): Boolean {
+            return sel.isNotBlank() &&
+                sel.length <= 240 &&
+                !sel.contains('{') &&
+                !sel.contains('}') &&
+                !sel.contains(';') &&
+                !sel.contains('<') &&
+                !sel.contains('>') &&
+                !sel.contains("@import", ignoreCase = true) &&
+                !sel.contains("url(", ignoreCase = true) &&
+                !sel.contains("expression(", ignoreCase = true)
+        }
+
         fun matchesAdBlockPattern(url: String, host: String, rawPattern: String): Boolean {
             val pattern = rawPattern.trim()
             if (pattern.isEmpty() || pattern.startsWith("!") || pattern.startsWith("##")) return false

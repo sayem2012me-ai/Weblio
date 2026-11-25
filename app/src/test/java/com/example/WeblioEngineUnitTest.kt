@@ -6,6 +6,7 @@ import com.example.data.security.KeystoreCryptoManager
 import com.example.engine.AdBlockEngine
 import com.example.engine.ExtensionEngine
 import com.example.engine.FilterUpdateWorker
+import com.example.engine.SearchSuggestionEngine
 import com.example.engine.WeblioDnsVpnService
 import com.example.engine.WeblioDownloadManager
 import com.example.data.db.DownloadFileCategory
@@ -28,8 +29,20 @@ class WeblioEngineUnitTest {
         assertEquals("https://example.com", BrowserViewModel.resolveInputToUrl("example.com", SearchEngine.GOOGLE))
         assertEquals("http://localhost:8080", BrowserViewModel.resolveInputToUrl("http://localhost:8080", SearchEngine.GOOGLE))
         assertEquals(
-            "https://duckduckgo.com/?q=weblio%20browser",
+            "https://duckduckgo.com/?q=weblio%20browser&kp=1",
             BrowserViewModel.resolveInputToUrl("weblio browser", SearchEngine.DUCKDUCKGO)
+        )
+        assertEquals(
+            "https://www.google.com/search?q=weblo%20app&safe=active",
+            BrowserViewModel.resolveInputToUrl("weblo app", SearchEngine.GOOGLE, safeSearchEnabled = true)
+        )
+        assertEquals(
+            "https://www.google.com/search?q=weblo%20app",
+            BrowserViewModel.resolveInputToUrl("weblo app", SearchEngine.GOOGLE, safeSearchEnabled = false)
+        )
+        assertEquals(
+            "https://www.google.com/search?q=kotlin&safe=active",
+            SearchEngine.enforceSafeSearchOnUrl("https://www.google.com/search?q=kotlin", true)
         )
     }
 
@@ -120,5 +133,28 @@ class WeblioEngineUnitTest {
         assertEquals("https://www.google.com/s2/favicons?domain=youtube.com&sz=128", websiteFaviconUrl("https://m.youtube.com"))
         assertEquals("https://www.google.com/s2/favicons?domain=wikipedia.org&sz=128", websiteFaviconUrl("https://www.wikipedia.org"))
         assertEquals("https://www.google.com/s2/favicons?domain=github.com&sz=128", websiteFaviconUrl("github.com"))
+    }
+
+    @Test
+    fun `search suggestion engine builds OpenSearch URLs and parses suggestion arrays`() {
+        assertEquals(
+            "https://suggestqueries.google.com/complete/search?client=firefox&q=weblo+browser",
+            SearchSuggestionEngine.buildSuggestUrl("weblo browser", SearchEngine.GOOGLE)
+        )
+        assertEquals(
+            "https://duckduckgo.com/ac/?q=kotlin&type=list",
+            SearchSuggestionEngine.buildSuggestUrl("kotlin", SearchEngine.DUCKDUCKGO)
+        )
+
+        val openSearchPayload = """["sesr",["sesr","sesric","search","search history","search"]]"""
+        val parsed = SearchSuggestionEngine.parseOpenSearchSuggestions(openSearchPayload, "sesr")
+        assertEquals(listOf("sesric", "search", "search history"), parsed)
+
+        val altPayload = """[{"phrase":"kotlin"},{"phrase":"kotlin coroutines"}]"""
+        val altParsed = SearchSuggestionEngine.parseOpenSearchSuggestions(altPayload, "kot")
+        assertEquals(listOf("kotlin", "kotlin coroutines"), altParsed)
+
+        assertTrue(SearchSuggestionEngine.looksLikeExplicitUrl("https://weblo.app"))
+        assertFalse(SearchSuggestionEngine.looksLikeExplicitUrl("weblo browser"))
     }
 }

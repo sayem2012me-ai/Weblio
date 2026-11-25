@@ -322,7 +322,7 @@ class ExtensionEngine(
 
         val warnings = mutableListOf<String>()
         if (manifest.has("declarative_net_request")) {
-            warnings.add("Manifest uses declarative_net_request; network filtering is handled by WEBLIO AdBlockEngine.")
+            warnings.add("Manifest uses declarative_net_request; network filtering is handled by Weblo AdBlockEngine.")
         }
         if (manifest.optJSONObject("background")?.has("service_worker") == true) {
             warnings.add("MV3 background service_worker detected; content scripts and popup run natively while background worker APIs are shimmed.")

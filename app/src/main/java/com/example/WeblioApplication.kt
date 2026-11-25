@@ -6,6 +6,7 @@ import androidx.work.ExistingPeriodicWorkPolicy
 import androidx.work.NetworkType
 import androidx.work.PeriodicWorkRequestBuilder
 import androidx.work.WorkManager
+import coil.Coil
 import com.example.data.WeblioRepository
 import com.example.data.db.WeblioDatabase
 import com.example.data.prefs.BrowserPreferences
@@ -19,9 +20,15 @@ import com.example.security.DownloadQuarantineManager
 import com.example.security.DownloadSecurityScanner
 import com.example.security.SecureUpdateVerifier
 import com.example.security.ThreatIntelligenceEngine
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.launch
 import java.util.concurrent.TimeUnit
 
 class WeblioApplication : Application() {
+
+    private val appScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
 
     lateinit var database: WeblioDatabase
         private set
@@ -63,8 +70,11 @@ class WeblioApplication : Application() {
         updateVerifier = SecureUpdateVerifier(this)
         backupManager = BackupRestoreManager(repository, preferences)
 
-        downloadManager.cleanupAbandonedQuarantine()
-        scheduleFilterUpdates()
+        appScope.launch {
+            runCatching { Coil.imageLoader(this@WeblioApplication) }
+            downloadManager.cleanupAbandonedQuarantine()
+            scheduleFilterUpdates()
+        }
     }
 
     private fun scheduleFilterUpdates() {

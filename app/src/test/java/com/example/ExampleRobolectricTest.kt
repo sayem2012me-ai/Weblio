@@ -47,8 +47,8 @@ class ExampleRobolectricTest {
     }
 
     @Test
-    fun `app name matches WEBLIO branding`() {
-        assertEquals("WEBLIO", context.getString(R.string.app_name))
+    fun `app name matches Weblo branding`() {
+        assertEquals("Weblo", context.getString(R.string.app_name))
     }
 
     @Test
@@ -168,5 +168,65 @@ class ExampleRobolectricTest {
         val adBlock = AdBlockEngine(repo)
         val cleaned = adBlock.cleanTrackingUrl("https://example.com/news?id=42&utm_source=x&fbclid=abc123")
         assertEquals("https://example.com/news?id=42", cleaned)
+    }
+
+    @Test
+    fun `fresh seeding does not pin default bookmarks and SafeSearch defaults to enabled`() = runTest {
+        val personalId = repo.ensureDefaultsSeeded()
+        val seededBookmarks = repo.observeBookmarks(personalId).first()
+        assertTrue(seededBookmarks.isEmpty())
+
+        val initialSettings = prefs.settingsFlow.first()
+        assertTrue(initialSettings.safeSearchEnabled)
+
+        prefs.setSafeSearchEnabled(false)
+        assertFalse(prefs.settingsFlow.first().safeSearchEnabled)
+    }
+
+    @Test
+    fun `legacy default bookmarks prune cleanly without deleting user bookmarks`() = runTest {
+        val personalId = repo.ensureDefaultsSeeded()
+        repo.addBookmark(personalId, "Wikipedia", "https://www.wikipedia.org", "Knowledge")
+        repo.addBookmark(personalId, "MDN Web Docs", "https://developer.mozilla.org", "Developer")
+        repo.addBookmark(personalId, "PrivacyTests.org", "https://privacytests.org", "Privacy")
+        repo.addBookmark(personalId, "My Saved Site", "https://example.org", "General")
+
+        repo.pruneLegacyDefaultBookmarks(personalId)
+        val remaining = repo.observeBookmarks(personalId).first()
+        assertEquals(1, remaining.size)
+        assertEquals("https://example.org", remaining.first().url)
+    }
+
+    @Test
+    fun `manifest registers WebKit DropDataContentProvider for package authority`() {
+        val authority = "${context.packageName}.DropDataProvider"
+        val providerInfo = context.packageManager.resolveContentProvider(authority, 0)
+        assertNotNull("Expected DropDataProvider to be declared in AndroidManifest.xml", providerInfo)
+        assertEquals("androidx.webkit.DropDataContentProvider", providerInfo?.name)
+    }
+
+    @Test
+    fun `renderer process gone handles background reclaim and foreground crash safely`() {
+        val app = ApplicationProvider.getApplicationContext<WeblioApplication>()
+        val vm = com.example.ui.BrowserViewModel(app)
+        val tabId = 99L
+
+        // Background memory kill (didCrash = false) auto-bumps version without blocking banner
+        vm.handleRendererProcessGone(tabId, null, didCrash = false)
+        val afterKill = vm.tabRuntime.value[tabId]
+        assertNotNull(afterKill)
+        assertEquals(1, afterKill?.webViewInstanceVersion)
+        assertEquals(1, afterKill?.rendererCrashCount)
+        assertEquals(null, afterKill?.errorBanner)
+
+        // Real renderer crash (didCrash = true) bumps version and surfaces recovery banner
+        vm.handleRendererProcessGone(tabId, null, didCrash = true)
+        val afterCrash = vm.tabRuntime.value[tabId]
+        assertEquals(2, afterCrash?.webViewInstanceVersion)
+        assertEquals(2, afterCrash?.rendererCrashCount)
+        assertNotNull(afterCrash?.errorBanner)
+
+        vm.dismissTabErrorBanner(tabId)
+        assertEquals(null, vm.tabRuntime.value[tabId]?.errorBanner)
     }
 }

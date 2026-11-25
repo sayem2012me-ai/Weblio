@@ -1,7 +1,9 @@
 package com.example.engine
 
+import android.Manifest
 import android.app.NotificationChannel
 import android.app.NotificationManager
+import android.content.ContentValues
 import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageInfo
@@ -10,11 +12,17 @@ import android.graphics.Bitmap
 import android.graphics.Canvas
 import android.graphics.drawable.BitmapDrawable
 import android.graphics.drawable.Drawable
+import android.media.MediaScannerConnection
 import android.net.Uri
 import android.os.Build
+import android.os.Environment
+import android.provider.MediaStore
+import android.util.Base64
 import android.util.LruCache
 import android.webkit.MimeTypeMap
+import android.webkit.URLUtil
 import androidx.core.app.NotificationCompat
+import androidx.core.content.ContextCompat
 import androidx.core.content.FileProvider
 import com.example.R
 import com.example.data.WeblioRepository
@@ -40,6 +48,7 @@ import kotlinx.coroutines.withTimeoutOrNull
 import okhttp3.OkHttpClient
 import okhttp3.Request
 import java.io.BufferedInputStream
+import java.io.BufferedOutputStream
 import java.io.File
 import java.io.FileInputStream
 import java.io.FileOutputStream
@@ -94,6 +103,10 @@ class WeblioDownloadManager(
         }
     }
 
+    @Volatile
+    private var notificationChannelCreated = false
+    private val lastNotifiedProgressPct = ConcurrentHashMap<Int, Int>()
+
     fun enqueueDownload(
         profileId: Long,
         url: String,
@@ -103,11 +116,16 @@ class WeblioDownloadManager(
         showNotification: Boolean = true
     ) {
         scope.launch {
+            if (url.startsWith("data:", ignoreCase = true)) {
+                handleDataUrlDownload(profileId, url, suggestedFileName, mimeType, showNotification)
+                return@launch
+            }
             if (!url.startsWith("http://", ignoreCase = true) && !url.startsWith("https://", ignoreCase = true)) {
                 return@launch
             }
             val fileName = sanitizeFileName(suggestedFileName ?: guessFileName(url, mimeType))
-            val resolvedMime = mimeType?.takeIf { it.isNotBlank() } ?: guessMime(fileName)
+            val resolvedMime = mimeType?.takeIf { it.isNotBlank() && !it.equals("application/octet-stream", true) }
+                ?: guessMime(fileName)
             val category = detectCategory(fileName, resolvedMime)
             val processKey = "dl_${profileId}_${url}_$fileName"
             if (!quarantineManager.tryAcquireProcessKey(processKey)) {
@@ -130,6 +148,73 @@ class WeblioDownloadManager(
             repository.updateDownload(draftEntity.copy(id = id, localPath = qFile.absolutePath))
             startOrResumeJob(id, userAgent, showNotification, processKey)
         }
+    }
+
+    private suspend fun handleDataUrlDownload(
+        profileId: Long,
+        dataUrl: String,
+        suggestedFileName: String?,
+        mimeType: String?,
+        showNotification: Boolean
+    ) {
+        val commaIdx = dataUrl.indexOf(',')
+        if (commaIdx <= 5) return
+        val meta = dataUrl.substring(5, commaIdx)
+        val isBase64 = meta.endsWith(";base64", ignoreCase = true) || meta.contains(";base64;", ignoreCase = true)
+        val headerMime = meta.substringBefore(';').trim().takeIf { it.contains('/') }
+        val resolvedMime = headerMime ?: mimeType?.takeIf { it.isNotBlank() } ?: "application/octet-stream"
+        val ext = MimeTypeMap.getSingleton().getExtensionFromMimeType(resolvedMime) ?: "bin"
+        val rawName = suggestedFileName?.takeIf { it.isNotBlank() && it != "download" }
+            ?: "weblo_media_${System.currentTimeMillis()}.$ext"
+        val fileName = sanitizeFileName(rawName)
+        val category = detectCategory(fileName, resolvedMime)
+
+        val payload = dataUrl.substring(commaIdx + 1)
+        val bytes = runCatching {
+            if (isBase64) Base64.decode(payload, Base64.DEFAULT) else Uri.decode(payload).toByteArray(Charsets.UTF_8)
+        }.getOrNull() ?: return
+
+        val draftEntity = DownloadEntity(
+            profileId = profileId,
+            url = "data:$resolvedMime",
+            fileName = fileName,
+            mimeType = resolvedMime,
+            category = category.name,
+            localPath = File(quarantineManager.quarantineDir, "pending_${System.currentTimeMillis()}").absolutePath,
+            totalBytes = bytes.size.toLong(),
+            downloadedBytes = bytes.size.toLong(),
+            status = DownloadStatus.SCANNING.name,
+            quarantined = true
+        )
+        val id = repository.insertDownload(draftEntity)
+        val qFile = quarantineManager.allocateQuarantineFile(id, fileName)
+        runCatching {
+            qFile.parentFile?.mkdirs()
+            BufferedOutputStream(FileOutputStream(qFile), IO_BUFFER_SIZE).use { it.write(bytes) }
+        }.onFailure { err ->
+            repository.updateDownload(
+                draftEntity.copy(
+                    id = id,
+                    localPath = qFile.absolutePath,
+                    status = DownloadStatus.FAILED.name,
+                    errorMessage = err.message ?: "Unable to save data payload",
+                    quarantined = false
+                )
+            )
+            return
+        }
+
+        val scanningItem = draftEntity.copy(id = id, localPath = qFile.absolutePath)
+        repository.updateDownload(scanningItem)
+        finalizeScannedQuarantineFile(
+            scanningItem = scanningItem,
+            quarantineFile = qFile,
+            expectedBytes = bytes.size.toLong(),
+            downloaded = bytes.size.toLong(),
+            resolvedMime = resolvedMime,
+            resolvedCategory = category,
+            showNotification = showNotification
+        )
     }
 
     fun pauseDownload(downloadId: Long) {
@@ -201,10 +286,21 @@ class WeblioDownloadManager(
         quarantineManager.promoteToDestination(quarantinedFile, destFile).getOrElse {
             return Result.failure(it)
         }
+        val category = runCatching { DownloadFileCategory.valueOf(current.category) }
+            .getOrElse { detectCategory(destFile.name, current.mimeType) }
+        val resolvedMime = current.mimeType.ifBlank { guessMime(destFile.name) }
+        val publicUriStr = publishToPublicStorage(destFile, destFile.name, resolvedMime, category)
+        val keepInternalCopy = isApkOrHtmlFile(destFile.name, resolvedMime, category) ||
+            publicUriStr == null ||
+            !verifyPublicUriReadable(publicUriStr)
+        if (!keepInternalCopy) {
+            runCatching { destFile.delete() }
+        }
         // Keep original securityVerdict (SUSPICIOUS/DANGEROUS/UNVERIFIED) & set userOverridden = true; NEVER auto-execute
         val promoted = current.copy(
             fileName = destFile.name,
             localPath = destFile.absolutePath,
+            publicUri = publicUriStr,
             status = DownloadStatus.COMPLETED.name,
             userOverridden = true,
             quarantined = false,
@@ -326,40 +422,58 @@ class WeblioDownloadManager(
         if (entity.quarantined || entity.status != DownloadStatus.COMPLETED.name) {
             return Result.failure(IllegalStateException("File is quarantined or unverified and cannot be opened"))
         }
-        val file = File(entity.localPath)
-        if (!quarantineManager.isConfinedWithin(file, downloadsDir) || !file.exists()) {
-            return Result.failure(IllegalStateException("File not found in Downloads storage"))
-        }
-        val resolvedMime = if (entity.fileName.endsWith(".apk", ignoreCase = true) ||
+        val isApk = entity.fileName.endsWith(".apk", ignoreCase = true) ||
             entity.category == DownloadFileCategory.APK.name
-        ) {
+        val resolvedMime = if (isApk) {
             "application/vnd.android.package-archive"
         } else {
             entity.mimeType.ifBlank { guessMime(entity.fileName) }
         }
-        return runCatching {
-            val uri = FileProvider.getUriForFile(context, "${context.packageName}.fileprovider", file)
-            Intent(Intent.ACTION_VIEW).apply {
-                setDataAndType(uri, resolvedMime)
-                addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_ACTIVITY_NEW_TASK)
+        val file = File(entity.localPath)
+        val hasConfinedLocalFile = quarantineManager.isConfinedWithin(file, downloadsDir) && file.exists()
+        if (hasConfinedLocalFile) {
+            return runCatching {
+                val uri = FileProvider.getUriForFile(context, "${context.packageName}.fileprovider", file)
+                Intent(Intent.ACTION_VIEW).apply {
+                    setDataAndType(uri, resolvedMime)
+                    addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_ACTIVITY_NEW_TASK)
+                }
             }
         }
+        val contentUri = entity.publicUri?.takeIf { it.isNotBlank() }?.let { raw ->
+            runCatching { Uri.parse(raw) }.getOrNull()?.takeIf { it.scheme == "content" }
+        }
+        if (contentUri != null && verifyPublicUriReadable(entity.publicUri)) {
+            return Result.success(
+                Intent(Intent.ACTION_VIEW).apply {
+                    setDataAndType(contentUri, resolvedMime)
+                    addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_ACTIVITY_NEW_TASK)
+                }
+            )
+        }
+        return Result.failure(IllegalStateException("File not found in Downloads storage"))
     }
 
     fun shareDownloadedFile(entity: DownloadEntity): Intent {
         if (!entity.quarantined && entity.status == DownloadStatus.COMPLETED.name) {
+            val contentUri = entity.publicUri?.takeIf { verifyPublicUriReadable(it) }?.let { raw ->
+                runCatching { Uri.parse(raw) }.getOrNull()?.takeIf { it.scheme == "content" }
+            }
             val file = File(entity.localPath)
-            if (quarantineManager.isConfinedWithin(file, downloadsDir) && file.exists()) {
-                val uri = runCatching {
+            val localUri = if (quarantineManager.isConfinedWithin(file, downloadsDir) && file.exists()) {
+                runCatching {
                     FileProvider.getUriForFile(context, "${context.packageName}.fileprovider", file)
                 }.getOrNull()
-                if (uri != null) {
-                    return Intent(Intent.ACTION_SEND).apply {
-                        type = entity.mimeType.ifBlank { "*/*" }
-                        putExtra(Intent.EXTRA_STREAM, uri)
-                        putExtra(Intent.EXTRA_SUBJECT, entity.fileName)
-                        addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
-                    }
+            } else {
+                null
+            }
+            val shareUri = localUri ?: contentUri
+            if (shareUri != null) {
+                return Intent(Intent.ACTION_SEND).apply {
+                    type = entity.mimeType.ifBlank { "*/*" }
+                    putExtra(Intent.EXTRA_STREAM, shareUri)
+                    putExtra(Intent.EXTRA_SUBJECT, entity.fileName)
+                    addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
                 }
             }
         }
@@ -398,6 +512,17 @@ class WeblioDownloadManager(
         }
         val finalName = if (oldFile.exists()) newFile.name else sanitized
         val resolvedMime = guessMime(finalName)
+        entity.publicUri?.takeIf { it.isNotBlank() }?.let { raw ->
+            runCatching {
+                val uri = Uri.parse(raw)
+                if (uri.scheme == "content") {
+                    val values = ContentValues().apply {
+                        put(MediaStore.MediaColumns.DISPLAY_NAME, finalName)
+                    }
+                    context.contentResolver.update(uri, values, null, null)
+                }
+            }
+        }
         val updated = entity.copy(
             fileName = finalName,
             localPath = if (oldFile.exists()) newFile.absolutePath else entity.localPath,
@@ -415,6 +540,7 @@ class WeblioDownloadManager(
         val current = repository.getDownload(downloadId)
         if (current != null) {
             quarantineManager.secureDelete(File(current.localPath))
+            deletePublicMediaEntry(current.publicUri)
         }
         repository.deleteDownload(downloadId)
     }
@@ -425,6 +551,7 @@ class WeblioDownloadManager(
             activeJobs.remove(item.id)
             _pendingReviews.update { list -> list.filterNot { it.download.id == item.id } }
             quarantineManager.secureDelete(File(item.localPath))
+            deletePublicMediaEntry(item.publicUri)
         }
         repository.clearDownloads(profileId)
     }
@@ -499,6 +626,30 @@ class WeblioDownloadManager(
                         }
 
                         val body = response.body ?: throw IllegalStateException("Empty response body")
+                        val contentDisposition = response.header("Content-Disposition")
+                        val headerMime = response.header("Content-Type")?.substringBefore(';')?.trim()
+                            ?.takeIf { it.isNotBlank() && !it.equals("application/octet-stream", ignoreCase = true) }
+                        val resolvedMime = headerMime ?: downloadingItem.mimeType.ifBlank { guessMime(downloadingItem.fileName) }
+                        val currentLooksGeneric = downloadingItem.fileName.endsWith(".bin", ignoreCase = true) ||
+                            downloadingItem.fileName.startsWith("weblo_file_", ignoreCase = true) ||
+                            downloadingItem.fileName.startsWith("weblio_file_", ignoreCase = true) ||
+                            !downloadingItem.fileName.contains('.')
+                        val effectiveFileName = if (currentLooksGeneric && (!contentDisposition.isNullOrBlank() || headerMime != null)) {
+                            sanitizeFileName(URLUtil.guessFileName(item.url, contentDisposition, resolvedMime))
+                        } else {
+                            downloadingItem.fileName
+                        }
+                        val effectiveCategory = detectCategory(effectiveFileName, resolvedMime)
+                        val activeDownloadItem = if (effectiveFileName != downloadingItem.fileName || resolvedMime != downloadingItem.mimeType) {
+                            downloadingItem.copy(
+                                fileName = effectiveFileName,
+                                mimeType = resolvedMime,
+                                category = effectiveCategory.name
+                            ).also { repository.updateDownload(it) }
+                        } else {
+                            downloadingItem
+                        }
+
                         val isPartial = response.code == 206
                         val acceptRanges = response.header("Accept-Ranges")?.equals("bytes", ignoreCase = true) == true || isPartial
                         val contentLen = body.contentLength()
@@ -507,19 +658,19 @@ class WeblioDownloadManager(
                         var downloaded = if (isPartial) existingBytes else 0L
                         var lastReportTime = 0L
 
-                        body.byteStream().use { input ->
-                            FileOutputStream(quarantineFile, isPartial).use { output ->
-                                val buffer = ByteArray(16 * 1024)
+                        BufferedInputStream(body.byteStream(), IO_BUFFER_SIZE).use { input ->
+                            BufferedOutputStream(FileOutputStream(quarantineFile, isPartial), IO_BUFFER_SIZE).use { output ->
+                                val buffer = ByteArray(IO_BUFFER_SIZE)
                                 while (isActive) {
                                     val read = input.read(buffer)
                                     if (read == -1) break
                                     output.write(buffer, 0, read)
                                     downloaded += read
                                     val now = System.currentTimeMillis()
-                                    if (now - lastReportTime > 300) {
+                                    if (now - lastReportTime >= PROGRESS_REPORT_INTERVAL_MS) {
                                         lastReportTime = now
                                         repository.updateDownload(
-                                            downloadingItem.copy(
+                                            activeDownloadItem.copy(
                                                 status = DownloadStatus.DOWNLOADING.name,
                                                 downloadedBytes = downloaded,
                                                 totalBytes = totalSize,
@@ -527,17 +678,18 @@ class WeblioDownloadManager(
                                             )
                                         )
                                         if (showNotification) {
-                                            postProgressNotification(downloadId.toInt(), item.fileName, downloaded, totalSize, false)
+                                            postProgressNotification(downloadId.toInt(), effectiveFileName, downloaded, totalSize, false)
                                         }
                                     }
                                 }
+                                output.flush()
                             }
                         }
 
                         if (!isActive) return@launch
 
-                        // Phase 2: Enter Security Scanning inside private quarantine before exposing to Downloads
-                        val scanningItem = downloadingItem.copy(
+                        // Phase 2: Enter Security Scanning inside private quarantine before exposing to Downloads / Gallery / Files
+                        val scanningItem = activeDownloadItem.copy(
                             status = DownloadStatus.SCANNING.name,
                             downloadedBytes = downloaded,
                             totalBytes = if (totalSize > 0) totalSize else downloaded,
@@ -546,106 +698,19 @@ class WeblioDownloadManager(
                         )
                         repository.updateDownload(scanningItem)
 
-                        val report = withTimeoutOrNull(SCAN_TIMEOUT_MS) {
-                            scanner.scanQuarantinedFile(
-                                file = quarantineFile,
-                                fileName = item.fileName,
-                                declaredMime = item.mimeType,
-                                expectedBytes = totalSize
-                            )
-                        } ?: DownloadScanReport(
-                            verdict = DownloadVerdict.UNVERIFIED,
-                            fileName = item.fileName,
-                            declaredMime = item.mimeType,
-                            detectedTypeLabel = item.category,
-                            sha256 = "",
-                            actualBytes = quarantineFile.length(),
+                        finalizeScannedQuarantineFile(
+                            scanningItem = scanningItem,
+                            quarantineFile = quarantineFile,
                             expectedBytes = totalSize,
-                            threatCategory = "Scan Timeout",
-                            detectionReason = "Security verification exceeded ${SCAN_TIMEOUT_MS / 1000}s limit.",
-                            recommendation = "Proceed only if you trust the download source.",
-                            couldNotFullyVerify = true
+                            downloaded = downloaded,
+                            resolvedMime = resolvedMime,
+                            resolvedCategory = effectiveCategory,
+                            showNotification = showNotification
                         )
-
-                        // Downgrade SAFE over insecure plain HTTP to SUSPICIOUS if executable/APK/archive
-                        val finalReport = if (item.url.startsWith("http://", ignoreCase = true) &&
-                            report.verdict == DownloadVerdict.SAFE &&
-                            (item.category == DownloadFileCategory.APK.name ||
-                                item.category == DownloadFileCategory.ARCHIVE.name ||
-                                item.category == DownloadFileCategory.EXECUTABLE.name)
-                        ) {
-                            report.copy(
-                                verdict = DownloadVerdict.SUSPICIOUS,
-                                threatCategory = "Insecure HTTP Transfer",
-                                detectionReason = "File was downloaded over unencrypted HTTP without transport integrity.",
-                                recommendation = "Prefer HTTPS downloads whenever available."
-                            )
-                        } else {
-                            report
-                        }
-
-                        if (finalReport.verdict == DownloadVerdict.SAFE) {
-                            val destFile = uniqueTargetFile(item.fileName)
-                            quarantineManager.promoteToDestination(quarantineFile, destFile).getOrThrow()
-                            val completed = scanningItem.copy(
-                                fileName = destFile.name,
-                                localPath = destFile.absolutePath,
-                                status = DownloadStatus.COMPLETED.name,
-                                sha256 = finalReport.sha256,
-                                securityVerdict = DownloadVerdict.SAFE.name,
-                                threatCategory = null,
-                                threatReason = null,
-                                scanSummary = "No known threats detected.",
-                                quarantined = false
-                            )
-                            repository.updateDownload(completed)
-                            repository.recordSecurityEvent(
-                                category = "DOWNLOAD",
-                                severity = "INFO",
-                                title = "Download verified clean",
-                                summary = "${completed.fileName}: No known threats detected.",
-                                targetHostOrFile = completed.fileName,
-                                actionTaken = "Promoted to Downloads"
-                            )
-                            if (showNotification) {
-                                postProgressNotification(downloadId.toInt(), completed.fileName, downloaded, downloaded, true)
-                            }
-                        } else {
-                            val quarantinedEntity = scanningItem.copy(
-                                status = DownloadStatus.QUARANTINED.name,
-                                sha256 = finalReport.sha256,
-                                securityVerdict = finalReport.verdict.name,
-                                threatCategory = finalReport.threatCategory,
-                                threatReason = finalReport.detectionReason,
-                                scanSummary = finalReport.recommendation,
-                                quarantined = true
-                            )
-                            repository.updateDownload(quarantinedEntity)
-                            val severity = if (finalReport.verdict == DownloadVerdict.DANGEROUS) "CRITICAL" else "WARNING"
-                            repository.recordSecurityEvent(
-                                category = "DOWNLOAD",
-                                severity = severity,
-                                title = "${finalReport.verdict.name} download quarantined",
-                                summary = "${quarantinedEntity.fileName}: ${finalReport.detectionReason}",
-                                targetHostOrFile = quarantinedEntity.fileName,
-                                actionTaken = "Held in Private Quarantine"
-                            )
-                            if (finalReport.verdict == DownloadVerdict.DANGEROUS) {
-                                SecurityNotifications.notify(
-                                    context = context,
-                                    enabled = securityNotificationsEnabled,
-                                    kind = SecurityNotifications.AlertKind.DANGEROUS_DOWNLOAD,
-                                    safeMessage = "Blocked ${quarantinedEntity.fileName}: ${finalReport.threatCategory ?: "Potential malware"}"
-                                )
-                            }
-                            _pendingReviews.update { current ->
-                                current.filterNot { it.download.id == quarantinedEntity.id } +
-                                    PendingQuarantineReview(quarantinedEntity, finalReport)
-                            }
-                        }
                     }
                 }.onFailure { err ->
                     if (isActive) {
+                        lastNotifiedProgressPct.remove(downloadId.toInt())
                         repository.updateDownload(
                             downloadingItem.copy(
                                 status = DownloadStatus.FAILED.name,
@@ -663,18 +728,296 @@ class WeblioDownloadManager(
         activeJobs[downloadId] = job
     }
 
+    private suspend fun finalizeScannedQuarantineFile(
+        scanningItem: DownloadEntity,
+        quarantineFile: File,
+        expectedBytes: Long,
+        downloaded: Long,
+        resolvedMime: String,
+        resolvedCategory: DownloadFileCategory,
+        showNotification: Boolean
+    ) {
+        val report = withTimeoutOrNull(SCAN_TIMEOUT_MS) {
+            scanner.scanQuarantinedFile(
+                file = quarantineFile,
+                fileName = scanningItem.fileName,
+                declaredMime = resolvedMime,
+                expectedBytes = expectedBytes
+            )
+        } ?: DownloadScanReport(
+            verdict = DownloadVerdict.UNVERIFIED,
+            fileName = scanningItem.fileName,
+            declaredMime = resolvedMime,
+            detectedTypeLabel = resolvedCategory.name,
+            sha256 = "",
+            actualBytes = quarantineFile.length(),
+            expectedBytes = expectedBytes,
+            threatCategory = "Scan Timeout",
+            detectionReason = "Security verification exceeded ${SCAN_TIMEOUT_MS / 1000}s limit.",
+            recommendation = "Proceed only if you trust the download source.",
+            couldNotFullyVerify = true
+        )
+
+        // Downgrade SAFE over insecure plain HTTP to SUSPICIOUS if executable/APK/archive
+        val finalReport = if (scanningItem.url.startsWith("http://", ignoreCase = true) &&
+            report.verdict == DownloadVerdict.SAFE &&
+            (resolvedCategory == DownloadFileCategory.APK ||
+                resolvedCategory == DownloadFileCategory.ARCHIVE ||
+                resolvedCategory == DownloadFileCategory.EXECUTABLE)
+        ) {
+            report.copy(
+                verdict = DownloadVerdict.SUSPICIOUS,
+                threatCategory = "Insecure HTTP Transfer",
+                detectionReason = "File was downloaded over unencrypted HTTP without transport integrity.",
+                recommendation = "Prefer HTTPS downloads whenever available."
+            )
+        } else {
+            report
+        }
+
+        if (finalReport.verdict == DownloadVerdict.SAFE) {
+            val destFile = uniqueTargetFile(scanningItem.fileName)
+            quarantineManager.promoteToDestination(quarantineFile, destFile).getOrThrow()
+            val publicUriStr = publishToPublicStorage(destFile, destFile.name, resolvedMime, resolvedCategory)
+            val keepInternalCopy = isApkOrHtmlFile(destFile.name, resolvedMime, resolvedCategory) ||
+                publicUriStr == null ||
+                !verifyPublicUriReadable(publicUriStr)
+            if (!keepInternalCopy) {
+                runCatching { destFile.delete() }
+            }
+            val completed = scanningItem.copy(
+                fileName = destFile.name,
+                localPath = destFile.absolutePath,
+                publicUri = publicUriStr,
+                mimeType = resolvedMime,
+                category = resolvedCategory.name,
+                status = DownloadStatus.COMPLETED.name,
+                sha256 = finalReport.sha256,
+                securityVerdict = DownloadVerdict.SAFE.name,
+                threatCategory = null,
+                threatReason = null,
+                scanSummary = "No known threats detected.",
+                quarantined = false
+            )
+            repository.updateDownload(completed)
+            repository.recordSecurityEvent(
+                category = "DOWNLOAD",
+                severity = "INFO",
+                title = "Download verified clean",
+                summary = "${completed.fileName}: No known threats detected.",
+                targetHostOrFile = completed.fileName,
+                actionTaken = if (publicUriStr != null) "Saved to Gallery / Files" else "Promoted to Downloads"
+            )
+            if (showNotification) {
+                postProgressNotification(scanningItem.id.toInt(), completed.fileName, downloaded, downloaded, true)
+            }
+        } else {
+            lastNotifiedProgressPct.remove(scanningItem.id.toInt())
+            val quarantinedEntity = scanningItem.copy(
+                status = DownloadStatus.QUARANTINED.name,
+                sha256 = finalReport.sha256,
+                securityVerdict = finalReport.verdict.name,
+                threatCategory = finalReport.threatCategory,
+                threatReason = finalReport.detectionReason,
+                scanSummary = finalReport.recommendation,
+                quarantined = true
+            )
+            repository.updateDownload(quarantinedEntity)
+            val severity = if (finalReport.verdict == DownloadVerdict.DANGEROUS) "CRITICAL" else "WARNING"
+            repository.recordSecurityEvent(
+                category = "DOWNLOAD",
+                severity = severity,
+                title = "${finalReport.verdict.name} download quarantined",
+                summary = "${quarantinedEntity.fileName}: ${finalReport.detectionReason}",
+                targetHostOrFile = quarantinedEntity.fileName,
+                actionTaken = "Held in Private Quarantine"
+            )
+            if (finalReport.verdict == DownloadVerdict.DANGEROUS) {
+                SecurityNotifications.notify(
+                    context = context,
+                    enabled = securityNotificationsEnabled,
+                    kind = SecurityNotifications.AlertKind.DANGEROUS_DOWNLOAD,
+                    safeMessage = "Blocked ${quarantinedEntity.fileName}: ${finalReport.threatCategory ?: "Potential malware"}"
+                )
+            }
+            _pendingReviews.update { current ->
+                current.filterNot { it.download.id == quarantinedEntity.id } +
+                    PendingQuarantineReview(quarantinedEntity, finalReport)
+            }
+        }
+    }
+
+    private fun isApkOrHtmlFile(fileName: String, mimeType: String, category: DownloadFileCategory): Boolean {
+        val lower = fileName.lowercase()
+        return category == DownloadFileCategory.APK ||
+            lower.endsWith(".apk") ||
+            mimeType.equals("application/vnd.android.package-archive", ignoreCase = true) ||
+            lower.endsWith(".html") || lower.endsWith(".htm") || lower.endsWith(".xhtml") ||
+            mimeType.equals("text/html", ignoreCase = true) ||
+            mimeType.equals("application/xhtml+xml", ignoreCase = true)
+    }
+
+    private fun verifyPublicUriReadable(uriStr: String?): Boolean {
+        if (uriStr.isNullOrBlank()) return false
+        return runCatching {
+            val uri = Uri.parse(uriStr)
+            if (uri.scheme != "content") return false
+            context.contentResolver.openAssetFileDescriptor(uri, "r")?.use { afd ->
+                afd.length > 0L || afd.declaredLength > 0L
+            } == true
+        }.getOrDefault(false)
+    }
+
+    private fun deletePublicMediaEntry(uriStr: String?) {
+        if (uriStr.isNullOrBlank()) return
+        runCatching {
+            val uri = Uri.parse(uriStr)
+            if (uri.scheme == "content") {
+                context.contentResolver.delete(uri, null, null)
+            }
+        }
+    }
+
+    private fun publishToPublicStorage(
+        sourceFile: File,
+        fileName: String,
+        mimeType: String,
+        category: DownloadFileCategory
+    ): String? {
+        if (!sourceFile.exists() || !sourceFile.isFile || sourceFile.length() == 0L) return null
+        val resolvedMime = normalizePublicMime(fileName, mimeType, category)
+
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+            return runCatching {
+                val (collectionUri, relativePath) = when {
+                    category == DownloadFileCategory.IMAGE || resolvedMime.startsWith("image/") -> {
+                        MediaStore.Images.Media.getContentUri(MediaStore.VOLUME_EXTERNAL_PRIMARY) to
+                            "${Environment.DIRECTORY_PICTURES}/Weblo"
+                    }
+                    category == DownloadFileCategory.VIDEO || resolvedMime.startsWith("video/") -> {
+                        MediaStore.Video.Media.getContentUri(MediaStore.VOLUME_EXTERNAL_PRIMARY) to
+                            "${Environment.DIRECTORY_MOVIES}/Weblo"
+                    }
+                    category == DownloadFileCategory.AUDIO || resolvedMime.startsWith("audio/") -> {
+                        MediaStore.Audio.Media.getContentUri(MediaStore.VOLUME_EXTERNAL_PRIMARY) to
+                            "${Environment.DIRECTORY_MUSIC}/Weblo"
+                    }
+                    else -> {
+                        MediaStore.Downloads.getContentUri(MediaStore.VOLUME_EXTERNAL_PRIMARY) to
+                            "${Environment.DIRECTORY_DOWNLOADS}/Weblo"
+                    }
+                }
+
+                val values = ContentValues().apply {
+                    put(MediaStore.MediaColumns.DISPLAY_NAME, fileName)
+                    put(MediaStore.MediaColumns.MIME_TYPE, resolvedMime)
+                    put(MediaStore.MediaColumns.RELATIVE_PATH, relativePath)
+                    put(MediaStore.MediaColumns.IS_PENDING, 1)
+                }
+
+                val resolver = context.contentResolver
+                val itemUri = resolver.insert(collectionUri, values) ?: return null
+                try {
+                    val outStream = resolver.openOutputStream(itemUri, "w")
+                        ?: throw IllegalStateException("MediaStore output stream unavailable")
+                    BufferedOutputStream(outStream, IO_BUFFER_SIZE).use { out ->
+                        BufferedInputStream(FileInputStream(sourceFile), IO_BUFFER_SIZE).use { input ->
+                            val buf = ByteArray(IO_BUFFER_SIZE)
+                            while (true) {
+                                val read = input.read(buf)
+                                if (read <= 0) break
+                                out.write(buf, 0, read)
+                            }
+                        }
+                        out.flush()
+                    }
+                    val finishValues = ContentValues().apply {
+                        put(MediaStore.MediaColumns.IS_PENDING, 0)
+                    }
+                    resolver.update(itemUri, finishValues, null, null)
+                    itemUri.toString()
+                } catch (e: Exception) {
+                    runCatching { resolver.delete(itemUri, null, null) }
+                    null
+                }
+            }.getOrNull()
+        }
+
+        // Android 7-9 fallback if legacy storage permission happens to be granted
+        if (ContextCompat.checkSelfPermission(context, Manifest.permission.WRITE_EXTERNAL_STORAGE) ==
+            PackageManager.PERMISSION_GRANTED
+        ) {
+            runCatching {
+                val baseDir = when {
+                    category == DownloadFileCategory.IMAGE || resolvedMime.startsWith("image/") -> Environment.DIRECTORY_PICTURES
+                    category == DownloadFileCategory.VIDEO || resolvedMime.startsWith("video/") -> Environment.DIRECTORY_MOVIES
+                    category == DownloadFileCategory.AUDIO || resolvedMime.startsWith("audio/") -> Environment.DIRECTORY_MUSIC
+                    else -> Environment.DIRECTORY_DOWNLOADS
+                }
+                val targetDir = File(Environment.getExternalStoragePublicDirectory(baseDir), "Weblo").apply { mkdirs() }
+                var target = File(targetDir, fileName)
+                if (target.exists()) {
+                    val dot = fileName.lastIndexOf('.')
+                    val stem = if (dot > 0) fileName.substring(0, dot) else fileName
+                    val ext = if (dot > 0) fileName.substring(dot) else ""
+                    var c = 1
+                    while (target.exists()) {
+                        target = File(targetDir, "$stem ($c)$ext")
+                        c++
+                    }
+                }
+                BufferedInputStream(FileInputStream(sourceFile), IO_BUFFER_SIZE).use { input ->
+                    BufferedOutputStream(FileOutputStream(target), IO_BUFFER_SIZE).use { out ->
+                        input.copyTo(out, IO_BUFFER_SIZE)
+                    }
+                }
+                MediaScannerConnection.scanFile(context, arrayOf(target.absolutePath), arrayOf(resolvedMime), null)
+            }
+        }
+        return null
+    }
+
+    private fun normalizePublicMime(fileName: String, mimeType: String, category: DownloadFileCategory): String {
+        val clean = mimeType.substringBefore(';').trim()
+        if (clean.isNotBlank() && !clean.equals("application/octet-stream", ignoreCase = true)) {
+            return clean
+        }
+        val guessed = guessMime(fileName)
+        if (guessed != "application/octet-stream") return guessed
+        return when (category) {
+            DownloadFileCategory.IMAGE -> "image/jpeg"
+            DownloadFileCategory.VIDEO -> "video/mp4"
+            DownloadFileCategory.AUDIO -> "audio/mpeg"
+            DownloadFileCategory.PDF -> "application/pdf"
+            DownloadFileCategory.ARCHIVE -> "application/zip"
+            DownloadFileCategory.APK -> "application/vnd.android.package-archive"
+            else -> "application/octet-stream"
+        }
+    }
+
     private fun postProgressNotification(id: Int, fileName: String, current: Long, total: Long, completed: Boolean) {
         val nm = context.getSystemService(NotificationManager::class.java) ?: return
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+        if (!notificationChannelCreated && Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
             nm.createNotificationChannel(
-                NotificationChannel(CHANNEL_ID, "WEBLIO Downloads", NotificationManager.IMPORTANCE_LOW)
+                NotificationChannel(CHANNEL_ID, "Weblo Downloads", NotificationManager.IMPORTANCE_LOW)
             )
+            notificationChannelCreated = true
         }
+        if (completed) {
+            lastNotifiedProgressPct.remove(id)
+        } else {
+            val pct = if (total > 0) ((current * 100) / total).toInt().coerceIn(0, 100) else -1
+            val prev = lastNotifiedProgressPct[id]
+            if (prev != null && prev == pct && pct >= 0) return
+            lastNotifiedProgressPct[id] = pct
+        }
+
         val builder = NotificationCompat.Builder(context, CHANNEL_ID)
             .setSmallIcon(R.mipmap.ic_launcher)
             .setContentTitle(fileName)
+            .setOnlyAlertOnce(true)
         if (completed) {
-            builder.setContentText("No known threats detected.")
+            builder.setContentText("Saved to Gallery & Files • No known threats detected.")
                 .setProgress(0, 0, false)
                 .setAutoCancel(true)
         } else {
@@ -706,6 +1049,8 @@ class WeblioDownloadManager(
         const val LOCAL_PREVIEW_HOST = "downloads.weblio.local"
         private const val CHANNEL_ID = "weblio_downloads"
         private const val SCAN_TIMEOUT_MS = 30_000L
+        private const val IO_BUFFER_SIZE = 64 * 1024
+        private const val PROGRESS_REPORT_INTERVAL_MS = 750L
         private val apkIconCache = LruCache<String, Bitmap>(32)
 
         private fun loadPackageArchiveInfo(pm: PackageManager, apkPath: String): PackageInfo? {
@@ -787,7 +1132,7 @@ class WeblioDownloadManager(
             val lastSeg = android.net.Uri.parse(url).lastPathSegment?.substringBefore('?')
             if (!lastSeg.isNullOrBlank() && lastSeg.contains('.')) return lastSeg
             val ext = mimeType?.let { MimeTypeMap.getSingleton().getExtensionFromMimeType(it) } ?: "bin"
-            return "weblio_file_${System.currentTimeMillis()}.$ext"
+            return "weblo_file_${System.currentTimeMillis()}.$ext"
         }
 
         fun guessMime(fileName: String): String {

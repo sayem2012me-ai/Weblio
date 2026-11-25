@@ -91,6 +91,9 @@ interface BookmarkDao {
     @Query("DELETE FROM bookmarks WHERE profileId = :profileId AND url = :url")
     suspend fun deleteByUrl(profileId: Long, url: String)
 
+    @Query("DELETE FROM bookmarks WHERE profileId = :profileId AND url = :url AND folder = :folder")
+    suspend fun deleteByUrlAndFolder(profileId: Long, url: String, folder: String)
+
     @Query("DELETE FROM bookmarks WHERE profileId = :profileId")
     suspend fun deleteAllForProfile(profileId: Long)
 }
@@ -222,6 +225,9 @@ interface AdBlockDao {
 
     @Query("UPDATE adblock_rules SET hitCount = hitCount + 1 WHERE id = :ruleId")
     suspend fun incrementHit(ruleId: Long)
+
+    @Query("UPDATE adblock_rules SET hitCount = hitCount + :delta WHERE id = :ruleId")
+    suspend fun incrementHitBy(ruleId: Long, delta: Long)
 
     @Query("SELECT * FROM adblock_subscriptions ORDER BY id ASC")
     fun observeSubscriptions(): Flow<List<FilterSubscriptionEntity>>

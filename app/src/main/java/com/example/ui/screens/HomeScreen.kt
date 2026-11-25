@@ -106,7 +106,8 @@ fun HomeScreen(
     onProfileClick: () -> Unit,
     onAddQuickLink: (String, String) -> Unit,
     onDeleteQuickLink: (QuickLinkEntity) -> Unit,
-    modifier: Modifier = Modifier
+    modifier: Modifier = Modifier,
+    onSearchBarClick: (() -> Unit)? = null
 ) {
     var showAddShortcutDialog by remember { mutableStateOf(false) }
     var editingQuickLinks by remember { mutableStateOf(false) }
@@ -215,9 +216,9 @@ fun HomeScreen(
                 WeblioLogoMark(size = 44.dp)
                 Spacer(modifier = Modifier.width(12.dp))
                 Text(
-                    text = if (isIncognito) "WEBLIO PRIVATE" else "WEBLIO",
+                    text = if (isIncognito) "Weblo Private" else "Weblo",
                     style = MaterialTheme.typography.headlineLarge.copy(
-                        letterSpacing = 2.sp,
+                        letterSpacing = 1.5.sp,
                         fontWeight = FontWeight.Bold
                     ),
                     color = if (isIncognito) WeblioIncognitoAccent else MaterialTheme.colorScheme.onBackground
@@ -250,7 +251,8 @@ fun HomeScreen(
                 onQrClick = onQrClick,
                 onVoiceClick = onVoiceClick,
                 onExtensionsClick = onExtensionsClick,
-                onShieldClick = onAdBlockClick
+                onShieldClick = onAdBlockClick,
+                onOpenSearchPage = onSearchBarClick?.let { click -> { _ -> click() } }
             )
 
             // Expandable Search Engine Selector Card (matching reference screenshot 5)

@@ -1,9 +1,9 @@
 <resources>
-    <string name="app_name">WEBLIO</string>
-    <string name="app_full_name">WEBLIO Browser</string>
+    <string name="app_name">Weblo</string>
+    <string name="app_full_name">Weblo Browser</string>
     <string name="tagline">EXPLORE. DISCOVER. EXPERIENCE.</string>
     <string name="search_hint">Search or enter website URL</string>
-    <string name="cd_weblio_logo">WEBLIO Browser Logo</string>
+    <string name="cd_weblio_logo">Weblo Browser Logo</string>
     <string name="cd_qr_scanner">Scan QR code</string>
     <string name="cd_voice_search">Voice search</string>
     <string name="cd_extensions">Extensions</string>
@@ -18,5 +18,5 @@
     <string name="cd_refresh">Reload page</string>
     <string name="cd_stop">Stop loading</string>
     <string name="error_ssl_title">Connection Not Private</string>
-    <string name="error_ssl_body">This website\'s security certificate failed validation. WEBLIO blocks untrusted certificates by default to protect your data.</string>
+    <string name="error_ssl_body">This website\'s security certificate failed validation. Weblo blocks untrusted certificates by default to protect your data.</string>
 </resources>

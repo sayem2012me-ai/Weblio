@@ -12,11 +12,13 @@ import android.net.http.SslError
 import android.os.Build
 import android.os.PersistableBundle
 import android.webkit.WebView
+import android.webkit.WebViewClient
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.withContext
 import java.io.File
 import java.io.FileOutputStream
 import kotlin.math.roundToInt
@@ -50,6 +52,7 @@ import com.example.engine.ExtensionEngine
 import com.example.engine.FilterUpdateWorker
 import com.example.engine.PendingQuarantineReview
 import com.example.engine.ProfileIsolationManager
+import com.example.engine.SearchSuggestionEngine
 import com.example.engine.WeblioDownloadManager
 import com.example.data.db.DownloadStatus
 import com.example.security.AppIntegrityReport
@@ -66,12 +69,14 @@ import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.combine
+import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.flatMapLatest
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
+import java.util.concurrent.atomic.AtomicLong
 
 data class TabRuntimeState(
     val tabId: Long,
@@ -90,7 +95,9 @@ data class TabRuntimeState(
     val isFullScreenVideo: Boolean = false,
     val blockedOnPage: Int = 0,
     val errorBanner: String? = null,
-    val isDesktopMode: Boolean = false
+    val isDesktopMode: Boolean = false,
+    val webViewInstanceVersion: Int = 0,
+    val rendererCrashCount: Int = 0
 )
 
 data class SslErrorPrompt(
@@ -158,23 +165,34 @@ class BrowserViewModel(application: Application) : AndroidViewModel(application)
 
     val closedTabs: StateFlow<List<ClosedTabEntity>> = activeProfileId
         .flatMapLatest { repo.observeClosedTabs(it) }
-        .stateIn(viewModelScope, SharingStarted.Eagerly, emptyList())
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), emptyList())
 
     val bookmarks: StateFlow<List<BookmarkEntity>> = activeProfileId
         .flatMapLatest { repo.observeBookmarks(it) }
-        .stateIn(viewModelScope, SharingStarted.Eagerly, emptyList())
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), emptyList())
 
     val history: StateFlow<List<HistoryEntity>> = activeProfileId
         .flatMapLatest { repo.observeHistory(it) }
-        .stateIn(viewModelScope, SharingStarted.Eagerly, emptyList())
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), emptyList())
 
     val downloads: StateFlow<List<DownloadEntity>> = activeProfileId
         .flatMapLatest { repo.observeDownloads(it) }
-        .stateIn(viewModelScope, SharingStarted.Eagerly, emptyList())
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), emptyList())
+
+    /** Lightweight root security flags so progress ticks on active downloads don't recompose browser chrome. */
+    val quarantineSecurityFlags: StateFlow<Pair<Boolean, Boolean>> = activeProfileId
+        .flatMapLatest { repo.observeDownloads(it) }
+        .map { list ->
+            val hasDangerous = list.any { it.status == DownloadStatus.QUARANTINED.name && it.securityVerdict == "DANGEROUS" }
+            val hasAny = list.any { it.status == DownloadStatus.QUARANTINED.name }
+            hasDangerous to hasAny
+        }
+        .distinctUntilChanged()
+        .stateIn(viewModelScope, SharingStarted.Eagerly, false to false)
 
     val passwords: StateFlow<List<PasswordEntity>> = activeProfileId
         .flatMapLatest { repo.observePasswords(it) }
-        .stateIn(viewModelScope, SharingStarted.Eagerly, emptyList())
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), emptyList())
 
     val quickLinks: StateFlow<List<QuickLinkEntity>> = activeProfileId
         .flatMapLatest { repo.observeQuickLinks(it) }
@@ -185,10 +203,10 @@ class BrowserViewModel(application: Application) : AndroidViewModel(application)
         .stateIn(viewModelScope, SharingStarted.Eagerly, emptyList())
 
     val adBlockRules: StateFlow<List<AdBlockRuleEntity>> = repo.observeAdBlockRules()
-        .stateIn(viewModelScope, SharingStarted.Eagerly, emptyList())
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), emptyList())
 
     val filterSubscriptions: StateFlow<List<FilterSubscriptionEntity>> = repo.observeFilterSubscriptions()
-        .stateIn(viewModelScope, SharingStarted.Eagerly, emptyList())
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), emptyList())
 
     val sitePermissions: StateFlow<List<SitePermissionEntity>> = activeProfileId
         .flatMapLatest { repo.observeSitePermissions(it) }
@@ -238,7 +256,7 @@ class BrowserViewModel(application: Application) : AndroidViewModel(application)
     }.stateIn(viewModelScope, SharingStarted.Eagerly, null)
 
     val securityEvents: StateFlow<List<SecurityEventEntity>> = repo.observeSecurityEvents()
-        .stateIn(viewModelScope, SharingStarted.Eagerly, emptyList())
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), emptyList())
 
     val pendingQuarantineReviews: StateFlow<List<PendingQuarantineReview>> = downloadManager.pendingReviews
 
@@ -260,50 +278,86 @@ class BrowserViewModel(application: Application) : AndroidViewModel(application)
     private val _pendingExtensionReview = MutableStateFlow<ExtensionEntity?>(null)
     val pendingExtensionReview: StateFlow<ExtensionEntity?> = _pendingExtensionReview.asStateFlow()
 
+    private val suggestionEngine = SearchSuggestionEngine()
+    private val _searchSuggestions = MutableStateFlow<List<String>>(emptyList())
+    val searchSuggestions: StateFlow<List<String>> = _searchSuggestions.asStateFlow()
+
+    private val _isLoadingSuggestions = MutableStateFlow(false)
+    val isLoadingSuggestions: StateFlow<Boolean> = _isLoadingSuggestions.asStateFlow()
+
+    private var suggestionJob: Job? = null
     private var oneTimeAllowedNavUrl: String? = null
     private var sessionThreatHits: Int = 0
     private var clipboardClearJob: Job? = null
+    private val pendingBlockedDelta = AtomicLong(0L)
+    private var blockedFlushJob: Job? = null
+    private val lastPreviewCaptureMeta = mutableMapOf<Long, Pair<String, Long>>()
 
     init {
         viewModelScope.launch {
-            val defaultProfileId = repo.ensureDefaultsSeeded()
-            val currentSettings = prefs.settingsFlow.first()
-            adBlock.globalEnabled = currentSettings.adBlockerEnabled
-            adBlock.trackerProtectionEnabled = currentSettings.trackerProtectionEnabled
-            adBlock.thirdPartyBlockingEnabled = currentSettings.thirdPartyRequestBlocking
+            val startup = withContext(Dispatchers.IO) {
+                val defaultProfileId = repo.ensureDefaultsSeeded()
+                if (!prefs.isDefaultBookmarksCleanedOnce()) {
+                    repo.observeProfiles().first().forEach { profile ->
+                        repo.pruneLegacyDefaultBookmarks(profile.id)
+                    }
+                    prefs.markDefaultBookmarksCleaned()
+                }
+                val currentSettings = prefs.settingsFlow.first()
+                adBlock.globalEnabled = currentSettings.adBlockerEnabled
+                adBlock.trackerProtectionEnabled = currentSettings.trackerProtectionEnabled
+                adBlock.thirdPartyBlockingEnabled = currentSettings.thirdPartyRequestBlocking
+
+                val profileId = repo.getProfile(currentSettings.activeProfileId)?.id ?: defaultProfileId
+                if (profileId != currentSettings.activeProfileId) {
+                    prefs.setActiveProfile(profileId)
+                }
+
+                var hadIncognitoTabs = false
+                if (currentSettings.clearIncognitoOnExit) {
+                    val beforeTabs = repo.observeTabs(profileId).first()
+                    hadIncognitoTabs = beforeTabs.any { it.isIncognito }
+                    if (hadIncognitoTabs) {
+                        repo.closeAllTabs(profileId, incognitoOnly = true)
+                    }
+                }
+
+                val existingTabs = repo.observeTabs(profileId).first()
+                val initialActiveTabId = when (currentSettings.startupBehavior) {
+                    StartupBehavior.HOME_SCREEN -> {
+                        repo.createTab(profileId, url = "weblio://home", title = "Home")
+                    }
+                    StartupBehavior.CUSTOM_HOMEPAGE -> {
+                        val hp = currentSettings.homepageUrl.ifBlank { "weblio://home" }
+                        repo.createTab(profileId, url = hp, title = if (hp == "weblio://home") "Home" else hp)
+                    }
+                    StartupBehavior.RESTORE_TABS -> {
+                        if (existingTabs.isEmpty()) {
+                            repo.createTab(profileId, url = "weblio://home", title = "Home")
+                        } else {
+                            existingTabs.maxByOrNull { it.lastActiveAt }?.id ?: existingTabs.first().id
+                        }
+                    }
+                }
+                Triple(currentSettings, initialActiveTabId, Pair(existingTabs, hadIncognitoTabs))
+            }
+
+            val currentSettings = startup.first
             if (currentSettings.biometricAppLockEnabled) {
                 _isAppLocked.value = true
             }
-
-            val profileId = repo.getProfile(currentSettings.activeProfileId)?.id ?: defaultProfileId
-            if (profileId != currentSettings.activeProfileId) {
-                prefs.setActiveProfile(profileId)
+            _activeTabId.value = startup.second
+            val existingTabs = startup.third.first
+            val hadIncognitoTabs = startup.third.second
+            if (currentSettings.startupBehavior == StartupBehavior.RESTORE_TABS && existingTabs.isNotEmpty()) {
+                loadCachedTabPreviews(existingTabs)
             }
-
-            if (currentSettings.clearIncognitoOnExit) {
-                repo.closeAllTabs(profileId, incognitoOnly = true)
-                ProfileIsolationManager.clearEphemeralData()
-            }
-
-            val existingTabs = repo.observeTabs(profileId).first()
-            when (currentSettings.startupBehavior) {
-                StartupBehavior.HOME_SCREEN -> {
-                    val tabId = repo.createTab(profileId, url = "weblio://home", title = "Home")
-                    _activeTabId.value = tabId
-                }
-                StartupBehavior.CUSTOM_HOMEPAGE -> {
-                    val hp = currentSettings.homepageUrl.ifBlank { "weblio://home" }
-                    val tabId = repo.createTab(profileId, url = hp, title = if (hp == "weblio://home") "Home" else hp)
-                    _activeTabId.value = tabId
-                }
-                StartupBehavior.RESTORE_TABS -> {
-                    if (existingTabs.isEmpty()) {
-                        val tabId = repo.createTab(profileId, url = "weblio://home", title = "Home")
-                        _activeTabId.value = tabId
-                    } else {
-                        _activeTabId.value = existingTabs.maxByOrNull { it.lastActiveAt }?.id ?: existingTabs.first().id
-                        loadCachedTabPreviews(existingTabs)
-                    }
+            if (hadIncognitoTabs) {
+                // Defer Chromium CookieManager/ProfileStore cleanup until after first frame renders
+                // so cold start SurfaceSyncGroup does not stall loading native Chromium on the UI thread.
+                viewModelScope.launch {
+                    delay(1_500L)
+                    ProfileIsolationManager.clearEphemeralData()
                 }
             }
         }
@@ -320,7 +374,7 @@ class BrowserViewModel(application: Application) : AndroidViewModel(application)
         viewModelScope.launch(Dispatchers.IO) {
             runIntegrityCheck()
             _threatDbCount.value = repo.countThreatIndicators()
-            val activeQuarantinePaths = downloads.value
+            val activeQuarantinePaths = repo.observeDownloads(activeProfileId.value).first()
                 .filter { it.quarantined }
                 .map { it.localPath }
                 .toSet()
@@ -336,11 +390,76 @@ class BrowserViewModel(application: Application) : AndroidViewModel(application)
 
     fun unregisterWebView(tabId: Long) {
         lastDispatchedUrl.remove(tabId)
+        lastPreviewCaptureMeta.remove(tabId)
+        val wasPlayingMedia = _tabRuntime.value[tabId]?.isMediaPlaying == true
         webViewRegistry.remove(tabId)?.apply {
             stopLoading()
+            webChromeClient = null
+            webViewClient = WebViewClient()
+            onPause()
+            clearHistory()
+            (parent as? android.view.ViewGroup)?.removeView(this)
+            removeAllViews()
             destroy()
         }
         _tabRuntime.update { it - tabId }
+        if (wasPlayingMedia && _tabRuntime.value.values.none { it.isMediaPlaying }) {
+            runCatching {
+                app.startService(
+                    android.content.Intent(app, com.example.engine.WeblioMediaService::class.java).apply {
+                        action = com.example.engine.WeblioMediaService.ACTION_STOP
+                    }
+                )
+            }
+        }
+    }
+
+    fun handleRendererProcessGone(tabId: Long, crashedView: WebView?, didCrash: Boolean) {
+        if (crashedView == null || webViewRegistry[tabId] === crashedView) {
+            webViewRegistry.remove(tabId)
+        }
+        lastDispatchedUrl.remove(tabId)
+        val previous = _tabRuntime.value[tabId] ?: TabRuntimeState(tabId = tabId)
+        val nextCrashes = previous.rendererCrashCount + 1
+        val canAutoRecover = !didCrash && previous.rendererCrashCount < 2
+        updateRuntimeState(tabId) {
+            it.copy(
+                isLoading = false,
+                progress = 0,
+                isMediaPlaying = false,
+                isFullScreenVideo = false,
+                webViewInstanceVersion = it.webViewInstanceVersion + 1,
+                rendererCrashCount = nextCrashes,
+                errorBanner = if (canAutoRecover) null else {
+                    if (didCrash) "Webpage renderer stopped unexpectedly. Tap Reload to restore this tab."
+                    else "Tab paused to save memory. Tap Reload to restore."
+                }
+            )
+        }
+    }
+
+    fun retryTabLoad(tabId: Long) {
+        val tab = tabs.value.firstOrNull { it.id == tabId } ?: return
+        val targetUrl = (_tabRuntime.value[tabId]?.currentUrl ?: tab.url)
+            .takeIf { it.isNotBlank() && it != "weblio://home" } ?: return
+        lastDispatchedUrl.remove(tabId)
+        val wv = webViewRegistry[tabId]
+        updateRuntimeState(tabId) {
+            it.copy(
+                errorBanner = null,
+                isLoading = true,
+                progress = 5,
+                webViewInstanceVersion = if (wv == null) it.webViewInstanceVersion + 1 else it.webViewInstanceVersion
+            )
+        }
+        if (wv != null) {
+            lastDispatchedUrl[tabId] = targetUrl
+            wv.loadUrl(targetUrl)
+        }
+    }
+
+    fun dismissTabErrorBanner(tabId: Long) {
+        updateRuntimeState(tabId) { it.copy(errorBanner = null) }
     }
 
     fun markUrlDispatched(tabId: Long, url: String) {
@@ -382,12 +501,19 @@ class BrowserViewModel(application: Application) : AndroidViewModel(application)
         }
     }
 
-    fun captureTabPreview(tabId: Long) {
+    fun captureTabPreview(tabId: Long, force: Boolean = false) {
         val wv = webViewRegistry[tabId] ?: return
         if (!wv.isAttachedToWindow || wv.width <= 0 || wv.height <= 0 || wv.contentHeight <= 0) return
         val rt = _tabRuntime.value[tabId]
         val currentUrl = rt?.currentUrl ?: wv.url
         if (currentUrl == null || currentUrl == "weblio://home") return
+
+        val now = System.currentTimeMillis()
+        val prev = lastPreviewCaptureMeta[tabId]
+        if (!force && prev != null && prev.first == currentUrl && (now - prev.second) < 3_000L && _tabPreviews.value[tabId] != null) {
+            return
+        }
+        lastPreviewCaptureMeta[tabId] = currentUrl to now
 
         runCatching {
             val targetWidth = 420
@@ -432,6 +558,7 @@ class BrowserViewModel(application: Application) : AndroidViewModel(application)
     }
 
     private fun deleteTabPreview(tabId: Long) {
+        lastPreviewCaptureMeta.remove(tabId)
         _tabPreviews.update { it - tabId }
         viewModelScope.launch(Dispatchers.IO) {
             runCatching { File(previewCacheDir, "tab_${tabId}.jpg").delete() }
@@ -446,7 +573,32 @@ class BrowserViewModel(application: Application) : AndroidViewModel(application)
         _isPasswordVaultUnlocked.value = unlocked
     }
 
-    fun copyToClipboard(text: String, isSensitive: Boolean, label: String = "WEBLIO") {
+    fun updateSearchQuery(rawQuery: String, engine: SearchEngine = settings.value.defaultSearchEngine) {
+        suggestionJob?.cancel()
+        val trimmed = rawQuery.trim()
+        if (trimmed.length < 2 || SearchSuggestionEngine.looksLikeExplicitUrl(trimmed)) {
+            _searchSuggestions.value = emptyList()
+            _isLoadingSuggestions.value = false
+            return
+        }
+        suggestionJob = viewModelScope.launch(Dispatchers.IO) {
+            delay(160L)
+            _isLoadingSuggestions.value = true
+            val results = runCatching {
+                suggestionEngine.fetchSuggestions(trimmed, engine)
+            }.getOrDefault(emptyList())
+            _searchSuggestions.value = results
+            _isLoadingSuggestions.value = false
+        }
+    }
+
+    fun clearSearchSuggestions() {
+        suggestionJob?.cancel()
+        _searchSuggestions.value = emptyList()
+        _isLoadingSuggestions.value = false
+    }
+
+    fun copyToClipboard(text: String, isSensitive: Boolean, label: String = "Weblo") {
         val cm = app.getSystemService(ClipboardManager::class.java) ?: return
         val guardActive = settings.value.clipboardGuardEnabled
         val clip = ClipData.newPlainText(label, text)
@@ -489,7 +641,7 @@ class BrowserViewModel(application: Application) : AndroidViewModel(application)
     // Tab Navigation & Lifecycle
     fun openUrlInActiveTab(rawInput: String) {
         val current = activeTab.value
-        var url = resolveInputToUrl(rawInput, settings.value.defaultSearchEngine)
+        var url = resolveInputToUrl(rawInput, settings.value.defaultSearchEngine, settings.value.safeSearchEnabled)
         if (current == null) {
             openNewTab(url)
             return
@@ -669,7 +821,7 @@ class BrowserViewModel(application: Application) : AndroidViewModel(application)
                 context = app,
                 enabled = settings.value.securityNotificationsEnabled,
                 kind = SecurityNotifications.AlertKind.REPEATED_SUSPICIOUS_ACTIVITY,
-                safeMessage = "WEBLIO blocked $sessionThreatHits suspicious sites or downloads in this session."
+                safeMessage = "Weblo blocked $sessionThreatHits suspicious sites or downloads in this session."
             )
         }
     }
@@ -683,7 +835,7 @@ class BrowserViewModel(application: Application) : AndroidViewModel(application)
     ) {
         viewModelScope.launch {
             val pid = activeProfileId.value
-            val cleanUrl = if (url == "weblio://home") url else resolveInputToUrl(url, settings.value.defaultSearchEngine)
+            val cleanUrl = if (url == "weblio://home") url else resolveInputToUrl(url, settings.value.defaultSearchEngine, settings.value.safeSearchEnabled)
             val resolvedTitle = when {
                 cleanUrl == "weblio://home" -> "Home"
                 !initialTitle.isNullOrBlank() -> initialTitle
@@ -727,6 +879,11 @@ class BrowserViewModel(application: Application) : AndroidViewModel(application)
             groupName = current?.groupName,
             initialTitle = entity.fileName
         )
+    }
+
+    fun resolveDownloadForPreview(downloadId: Long): DownloadEntity? {
+        return downloads.value.firstOrNull { it.id == downloadId }
+            ?: kotlinx.coroutines.runBlocking { repo.getDownload(downloadId) }
     }
 
     fun selectTab(tabId: Long) {
@@ -827,8 +984,8 @@ class BrowserViewModel(application: Application) : AndroidViewModel(application)
 
     fun goHomeInActiveTab() {
         val tab = activeTab.value ?: return
-        webViewRegistry[tab.id]?.stopLoading()
         deleteTabPreview(tab.id)
+        unregisterWebView(tab.id)
         updateRuntimeState(tab.id) {
             TabRuntimeState(
                 tabId = tab.id,
@@ -881,7 +1038,11 @@ class BrowserViewModel(application: Application) : AndroidViewModel(application)
     fun webViewReloadOrStop() {
         val tab = activeTab.value ?: return
         val rt = _tabRuntime.value[tab.id]
-        val wv = webViewRegistry[tab.id] ?: return
+        val wv = webViewRegistry[tab.id]
+        if (wv == null || rt?.errorBanner != null || wv.url.isNullOrBlank()) {
+            retryTabLoad(tab.id)
+            return
+        }
         if (rt?.isLoading == true) wv.stopLoading() else wv.reload()
     }
 
@@ -1057,8 +1218,8 @@ class BrowserViewModel(application: Application) : AndroidViewModel(application)
     fun toggleCurrentPageBookmark() {
         val tab = activeTab.value ?: return
         if (tab.url == "weblio://home") return
-        val existing = bookmarks.value.firstOrNull { it.url == tab.url }
         viewModelScope.launch {
+            val existing = repo.observeBookmarks(activeProfileId.value).first().firstOrNull { it.url == tab.url }
             if (existing != null) {
                 repo.deleteBookmark(existing)
                 showMessage("Bookmark removed")
@@ -1151,7 +1312,8 @@ class BrowserViewModel(application: Application) : AndroidViewModel(application)
 
     fun viewModelScopeClearDownloads() {
         viewModelScope.launch(Dispatchers.IO) {
-            downloadManager.clearAllDownloads(activeProfileId.value, downloads.value)
+            val currentList = repo.observeDownloads(activeProfileId.value).first()
+            downloadManager.clearAllDownloads(activeProfileId.value, currentList)
         }
     }
 
@@ -1243,7 +1405,7 @@ class BrowserViewModel(application: Application) : AndroidViewModel(application)
     fun installExtensionFromStorePage(pageUrl: String, pageTitle: String?) {
         val ref = ExtensionEngine.extractStoreExtensionDownload(pageUrl)
         if (ref == null) {
-            showMessage("Open an extension's detail page to install it into WEBLIO")
+            showMessage("Open an extension's detail page to install it into Weblo")
             return
         }
         val cleanName = pageTitle
@@ -1496,9 +1658,18 @@ class BrowserViewModel(application: Application) : AndroidViewModel(application)
 
     // AdBlock & Site Permissions
     fun onBlockedRequest(url: String) {
-        viewModelScope.launch { prefs.incrementBlockedCount(1L) }
+        pendingBlockedDelta.incrementAndGet()
         activeTab.value?.id?.let { tid ->
             updateRuntimeState(tid) { it.copy(blockedOnPage = it.blockedOnPage + 1) }
+        }
+        if (blockedFlushJob?.isActive != true) {
+            blockedFlushJob = viewModelScope.launch {
+                delay(3_000L)
+                val delta = pendingBlockedDelta.getAndSet(0L)
+                if (delta > 0L) {
+                    prefs.incrementBlockedCount(delta)
+                }
+            }
         }
     }
 
@@ -1540,6 +1711,7 @@ class BrowserViewModel(application: Application) : AndroidViewModel(application)
 
     // Settings updates
     fun setSearchEngine(engine: SearchEngine) = viewModelScope.launch { prefs.setSearchEngine(engine) }
+    fun setSafeSearchEnabled(enabled: Boolean) = viewModelScope.launch { prefs.setSafeSearchEnabled(enabled) }
     fun setHomepage(url: String) = viewModelScope.launch {
         val trimmed = url.trim()
         val safeUrl = when {
@@ -1685,8 +1857,7 @@ class BrowserViewModel(application: Application) : AndroidViewModel(application)
     fun computeOverallSecurityState(): SecurityState {
         val integrity = _appIntegrityReport.value
         val s = settings.value
-        val hasDangerousQuarantine = downloads.value.any { it.status == "QUARANTINED" && it.securityVerdict == "DANGEROUS" }
-        val hasAnyQuarantine = downloads.value.any { it.status == "QUARANTINED" }
+        val (hasDangerousQuarantine, hasAnyQuarantine) = quarantineSecurityFlags.value
         val hasHighRiskEnabledExt = extensions.value.any { it.enabled && it.riskLevel == "HIGH" }
 
         return when {
@@ -1754,7 +1925,11 @@ class BrowserViewModel(application: Application) : AndroidViewModel(application)
             }
         }
 
-        fun resolveInputToUrl(raw: String, searchEngine: SearchEngine): String {
+        fun resolveInputToUrl(
+            raw: String,
+            searchEngine: SearchEngine,
+            safeSearchEnabled: Boolean = true
+        ): String {
             val trimmed = raw.trim()
             if (trimmed.isEmpty() || trimmed == "weblio://home") return "weblio://home"
             if (trimmed.startsWith("http://", ignoreCase = true) ||
@@ -1765,7 +1940,7 @@ class BrowserViewModel(application: Application) : AndroidViewModel(application)
             }
             val looksLikeHost = !trimmed.contains(" ") &&
                 (trimmed.contains(".") || trimmed.startsWith("localhost", ignoreCase = true))
-            return if (looksLikeHost) "https://$trimmed" else searchEngine.buildSearchUrl(trimmed)
+            return if (looksLikeHost) "https://$trimmed" else searchEngine.buildSearchUrl(trimmed, safeSearchEnabled)
         }
 
         fun extractHost(url: String): String {

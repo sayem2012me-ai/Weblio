@@ -333,7 +333,8 @@ class WeblioSecurityTest {
         assertFalse(promoted.quarantined)
         assertEquals(DownloadVerdict.SUSPICIOUS.name, promoted.securityVerdict)
         assertFalse(qFile2.exists())
-        assertTrue(File(promoted.localPath).exists())
+        assertTrue(File(promoted.localPath).exists() || !promoted.publicUri.isNullOrBlank())
+        assertTrue(dm.openDownloadedFile(promoted).isSuccess)
 
         // Duplicate download key prevention
         assertTrue(quarantineManager.tryAcquireProcessKey("dl_1_same"))
@@ -522,7 +523,7 @@ class WeblioSecurityTest {
         composeRule.waitForIdle()
         composeRule.onNodeWithText("DANGEROUS WEBSITE!").assertIsDisplayed()
         composeRule.onNodeWithText(
-            "WEBLIO Security Protection has detected a potential threat. This website may attempt to steal your information, install malicious software, or compromise your privacy."
+            "Weblo Security Protection has detected a potential threat. This website may attempt to steal your information, install malicious software, or compromise your privacy."
         ).assertIsDisplayed()
         composeRule.onNodeWithTag("website_warning_goback").performScrollTo().performClick()
         assertTrue(backCalled)
@@ -959,5 +960,69 @@ class WeblioSecurityTest {
         assertFalse(css.contains("evil.test"))
         assertFalse(css.contains("@import"))
         assertNull(adBlockEngine.queryDoh("http://insecure-doh.example/dns-query", byteArrayOf(0x01, 0x02)))
+    }
+
+    @Test
+    fun `25_binary media streaming scan, adblock domain indexing, and publicUri validation work safely`() = runBlocking {
+        // 1. Valid MP4 >1MB scans cleanly via binary fast-path without text regex overhead
+        val mp4File = File(tempWorkDir, "clip.mp4")
+        val digest = MessageDigest.getInstance("SHA-256")
+        FileOutputStream(mp4File).use { fos ->
+            val ftypHeader = byteArrayOf(
+                0x00, 0x00, 0x00, 0x18,
+                'f'.code.toByte(), 't'.code.toByte(), 'y'.code.toByte(), 'p'.code.toByte(),
+                'm'.code.toByte(), 'p'.code.toByte(), '4'.code.toByte(), '2'.code.toByte(),
+                0x00, 0x00, 0x00, 0x00
+            )
+            fos.write(ftypHeader)
+            digest.update(ftypHeader)
+            val filler = ByteArray(64 * 1024) { 0x2A }
+            repeat(20) {
+                fos.write(filler)
+                digest.update(filler)
+            }
+        }
+        val expectedSha = digest.digest().joinToString("") { "%02x".format(it) }
+        val mp4Report = scanner.scanQuarantinedFile(mp4File, "clip.mp4", "video/mp4", mp4File.length())
+        assertEquals(DownloadVerdict.SAFE, mp4Report.verdict)
+        assertEquals(expectedSha, mp4Report.sha256)
+        assertEquals("No known threats detected.", mp4Report.detectionReason)
+
+        // 2. AdBlockEngine indexed domain & DNS blocking without rebuilding on hit updates
+        repository.addAdBlockRule("||ads.doubleclick.net^", FilterRuleType.NETWORK_BLOCK)
+        repository.addAdBlockRule("tracker.bad.example", FilterRuleType.DNS_BLOCK)
+        repository.addAdBlockRule("@@||safe.ads.doubleclick.net^", FilterRuleType.NETWORK_ALLOW)
+        val engine = AdBlockEngine(repository)
+        kotlinx.coroutines.delay(150)
+
+        fun fakeReq(rawUrl: String): android.webkit.WebResourceRequest = object : android.webkit.WebResourceRequest {
+            override fun getUrl(): android.net.Uri = android.net.Uri.parse(rawUrl)
+            override fun isForMainFrame(): Boolean = false
+            override fun isRedirect(): Boolean = false
+            override fun hasGesture(): Boolean = false
+            override fun getMethod(): String = "GET"
+            override fun getRequestHeaders(): MutableMap<String, String> = mutableMapOf()
+        }
+
+        assertNotNull(engine.interceptRequest(fakeReq("https://sub.ads.doubleclick.net/banner.js"), "news.example", true))
+        assertNull(engine.interceptRequest(fakeReq("https://safe.ads.doubleclick.net/ok.js"), "news.example", true))
+        assertTrue(engine.isDnsDomainBlocked("sub.tracker.bad.example"))
+        assertFalse(engine.isDnsDomainBlocked("wikipedia.org"))
+
+        // 3. Reject forged file:// publicUri even when DownloadEntity is marked COMPLETED
+        val dm = WeblioDownloadManager(context, repository, quarantineManager, scanner)
+        val forgedPublicEntity = DownloadEntity(
+            id = 777L,
+            profileId = 1L,
+            url = "https://example.com/photo.jpg",
+            fileName = "photo.jpg",
+            mimeType = "image/jpeg",
+            category = DownloadFileCategory.IMAGE.name,
+            localPath = File(quarantineManager.downloadsDir, "nonexistent.jpg").absolutePath,
+            publicUri = "file:///etc/hosts",
+            status = DownloadStatus.COMPLETED.name,
+            quarantined = false
+        )
+        assertTrue(dm.openDownloadedFile(forgedPublicEntity).isFailure)
     }
 }

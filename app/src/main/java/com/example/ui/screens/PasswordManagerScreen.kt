@@ -187,7 +187,7 @@ fun PasswordManagerScreen(
                                                     onCopyPassword(dec)
                                                 } else {
                                                     val cm = context.getSystemService(ClipboardManager::class.java)
-                                                    val clip = ClipData.newPlainText("WEBLIO Password", dec).apply {
+                                                    val clip = ClipData.newPlainText("Weblo Password", dec).apply {
                                                         description.extras = PersistableBundle().apply {
                                                             val key = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
                                                                 ClipDescription.EXTRA_IS_SENSITIVE

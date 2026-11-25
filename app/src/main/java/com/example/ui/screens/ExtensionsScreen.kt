@@ -363,7 +363,7 @@ fun ExtensionsScreen(
                                             Column(modifier = Modifier.weight(1f)) {
                                                 Text(item.name, style = MaterialTheme.typography.titleMedium)
                                                 Text(
-                                                    text = "v${item.version} • ${if (item.sourceType == "CHROME_WEBEXT") "Chrome WebExtension" else "WEBLIO Engine"}",
+                                                    text = "v${item.version} • ${if (item.sourceType == "CHROME_WEBEXT") "Chrome WebExtension" else "Weblo Engine"}",
                                                     style = MaterialTheme.typography.labelSmall,
                                                     color = WeblioCyan
                                                 )
@@ -420,7 +420,7 @@ fun ExtensionsScreen(
                                         style = MaterialTheme.typography.labelSmall
                                     )
                                     Text(
-                                        text = "Android System WebView does not embed Chromium's desktop C++ extension daemon, so arbitrary Chrome Web Store .crx binaries using nativeMessaging, chrome.debugger, or MV3 offscreen service workers cannot run unmodified. WEBLIO executes real .user.js UserScripts, unpacked .zip/.crx content scripts, CSS stylesheets, and popup HTML via our WebExtension JS bridge.",
+                                        text = "Android System WebView does not embed Chromium's desktop C++ extension daemon, so arbitrary Chrome Web Store .crx binaries using nativeMessaging, chrome.debugger, or MV3 offscreen service workers cannot run unmodified. Weblo executes real .user.js UserScripts, unpacked .zip/.crx content scripts, CSS stylesheets, and popup HTML via our WebExtension JS bridge.",
                                         style = MaterialTheme.typography.bodySmall,
                                         color = MaterialTheme.colorScheme.onSurfaceVariant
                                     )
@@ -661,7 +661,7 @@ private fun CreateUserScriptDialog(
             // @match        *://*/*
             // @run-at       document-end
             // ==/UserScript==
-            console.log('WEBLIO UserScript active on', location.href);
+            console.log('Weblo UserScript active on', location.href);
             """.trimIndent()
         )
     }
@@ -757,7 +757,7 @@ fun ExtensionSecurityReviewDialog(
                             color = riskColor
                         )
                         Text(
-                            text = "Installed disabled by WEBLIO Extension Guard. Review requested permissions before enabling.",
+                            text = "Installed disabled by Weblo Extension Guard. Review requested permissions before enabling.",
                             style = MaterialTheme.typography.bodySmall,
                             color = MaterialTheme.colorScheme.onSurface
                         )

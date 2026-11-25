@@ -8,6 +8,7 @@ import androidx.datastore.preferences.core.stringPreferencesKey
 import androidx.datastore.preferences.preferencesDataStore
 import com.example.ui.theme.AppThemeMode
 import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.map
 
 private val Context.browserDataStore by preferencesDataStore(name = "weblio_browser_prefs")
@@ -24,13 +25,61 @@ enum class SearchEngine(
     BING("Bing", "https://www.bing.com/search?q=%s", "https://www.bing.com", "bing.com"),
     ECOSIA("Ecosia", "https://www.ecosia.org/search?q=%s", "https://www.ecosia.org", "ecosia.org");
 
-    fun buildSearchUrl(query: String): String {
+    fun buildSearchUrl(query: String, safeSearchEnabled: Boolean = true): String {
         val encoded = java.net.URLEncoder.encode(query.trim(), "UTF-8").replace("+", "%20")
-        return searchUrlTemplate.replace("%s", encoded)
+        val base = searchUrlTemplate.replace("%s", encoded)
+        return when (this) {
+            GOOGLE -> if (safeSearchEnabled) "$base&safe=active" else base
+            DUCKDUCKGO -> if (safeSearchEnabled) "$base&kp=1" else "$base&kp=-2"
+            BRAVE -> if (safeSearchEnabled) "$base&safesearch=strict" else "$base&safesearch=off"
+            BING -> if (safeSearchEnabled) "$base&adlt=strict" else "$base&adlt=off"
+            ECOSIA -> if (safeSearchEnabled) "$base&safesearch=2" else "$base&safesearch=0"
+        }
     }
 
     fun logoUrl(size: Int = 128): String =
         "https://www.google.com/s2/favicons?domain=$logoDomain&sz=$size"
+
+    companion object {
+        fun enforceSafeSearchOnUrl(rawUrl: String, safeSearchEnabled: Boolean): String {
+            if (!safeSearchEnabled) return rawUrl
+            val uri = runCatching { java.net.URI(rawUrl) }.getOrNull() ?: return rawUrl
+            val host = uri.host?.lowercase() ?: return rawUrl
+            val path = uri.path.orEmpty().lowercase()
+            val query = uri.rawQuery ?: return rawUrl
+            if (!query.contains("q=")) return rawUrl
+
+            val paramPair: Pair<String, String>? = when {
+                (host.contains("google.") && path.startsWith("/search")) -> "safe" to "active"
+                (host == "duckduckgo.com" || host.endsWith(".duckduckgo.com")) -> "kp" to "1"
+                host == "search.brave.com" && path.startsWith("/search") -> "safesearch" to "strict"
+                (host == "bing.com" || host.endsWith(".bing.com")) && path.startsWith("/search") -> "adlt" to "strict"
+                (host == "ecosia.org" || host.endsWith(".ecosia.org")) && path.startsWith("/search") -> "safesearch" to "2"
+                else -> null
+            }
+            val (key, desiredVal) = paramPair ?: return rawUrl
+
+            val pairs = query.split("&").filter { it.isNotEmpty() }.toMutableList()
+            val existingIdx = pairs.indexOfFirst { it.startsWith("$key=", ignoreCase = true) }
+            if (existingIdx >= 0) {
+                val existingVal = pairs[existingIdx].substringAfter('=')
+                if (existingVal.equals(desiredVal, ignoreCase = true)) return rawUrl
+                pairs[existingIdx] = "$key=$desiredVal"
+            } else {
+                pairs.add("$key=$desiredVal")
+            }
+            val updatedQuery = pairs.joinToString("&")
+            return runCatching {
+                java.net.URI(
+                    uri.scheme,
+                    uri.rawAuthority,
+                    uri.rawPath,
+                    updatedQuery,
+                    uri.rawFragment
+                ).toString()
+            }.getOrDefault(rawUrl)
+        }
+    }
 }
 
 fun websiteFaviconUrl(rawUrl: String, size: Int = 128): String {
@@ -84,6 +133,7 @@ enum class WallpaperStyle(val label: String) {
 data class BrowserSettings(
     val activeProfileId: Long = 1L,
     val defaultSearchEngine: SearchEngine = SearchEngine.GOOGLE,
+    val safeSearchEnabled: Boolean = true,
     val homepageUrl: String = "weblio://home",
     val startupBehavior: StartupBehavior = StartupBehavior.RESTORE_TABS,
     val languageTag: String = "en",
@@ -107,7 +157,7 @@ data class BrowserSettings(
     val javascriptEnabled: Boolean = true,
     val desktopModeDefault: Boolean = false,
     val hardwareAccelerationEnabled: Boolean = true,
-    val downloadLocationLabel: String = "App Downloads (Scoped Storage)",
+    val downloadLocationLabel: String = "Gallery & Files (Weblo)",
     val downloadNotificationsEnabled: Boolean = true,
     val askBeforeDownload: Boolean = true,
     val totalBlockedCount: Long = 0L,
@@ -124,6 +174,8 @@ class BrowserPreferences(private val context: Context) {
     private object Keys {
         val ACTIVE_PROFILE_ID = longPreferencesKey("active_profile_id")
         val SEARCH_ENGINE = stringPreferencesKey("search_engine")
+        val SAFE_SEARCH = booleanPreferencesKey("safe_search_enabled")
+        val DEFAULT_BOOKMARKS_CLEANED = booleanPreferencesKey("default_bookmarks_cleaned_v1")
         val HOMEPAGE_URL = stringPreferencesKey("homepage_url")
         val STARTUP_BEHAVIOR = stringPreferencesKey("startup_behavior")
         val LANGUAGE = stringPreferencesKey("language")
@@ -165,6 +217,7 @@ class BrowserPreferences(private val context: Context) {
             defaultSearchEngine = p[Keys.SEARCH_ENGINE]?.let {
                 runCatching { SearchEngine.valueOf(it) }.getOrNull()
             } ?: SearchEngine.GOOGLE,
+            safeSearchEnabled = p[Keys.SAFE_SEARCH] ?: true,
             homepageUrl = p[Keys.HOMEPAGE_URL] ?: "weblio://home",
             startupBehavior = p[Keys.STARTUP_BEHAVIOR]?.let {
                 runCatching { StartupBehavior.valueOf(it) }.getOrNull()
@@ -198,7 +251,7 @@ class BrowserPreferences(private val context: Context) {
             javascriptEnabled = p[Keys.JS_ENABLED] ?: true,
             desktopModeDefault = p[Keys.DESKTOP_MODE_DEFAULT] ?: false,
             hardwareAccelerationEnabled = p[Keys.HW_ACCEL] ?: true,
-            downloadLocationLabel = p[Keys.DOWNLOAD_LOCATION] ?: "App Downloads (Scoped Storage)",
+            downloadLocationLabel = p[Keys.DOWNLOAD_LOCATION] ?: "Gallery & Files (Weblo)",
             downloadNotificationsEnabled = p[Keys.DOWNLOAD_NOTIFS] ?: true,
             askBeforeDownload = p[Keys.ASK_BEFORE_DOWNLOAD] ?: true,
             totalBlockedCount = p[Keys.TOTAL_BLOCKED] ?: 0L,
@@ -213,6 +266,10 @@ class BrowserPreferences(private val context: Context) {
 
     suspend fun setActiveProfile(profileId: Long) = context.browserDataStore.edit { it[Keys.ACTIVE_PROFILE_ID] = profileId }
     suspend fun setSearchEngine(engine: SearchEngine) = context.browserDataStore.edit { it[Keys.SEARCH_ENGINE] = engine.name }
+    suspend fun setSafeSearchEnabled(enabled: Boolean) = context.browserDataStore.edit { it[Keys.SAFE_SEARCH] = enabled }
+    suspend fun isDefaultBookmarksCleanedOnce(): Boolean =
+        context.browserDataStore.data.map { it[Keys.DEFAULT_BOOKMARKS_CLEANED] ?: false }.first()
+    suspend fun markDefaultBookmarksCleaned() = context.browserDataStore.edit { it[Keys.DEFAULT_BOOKMARKS_CLEANED] = true }
     suspend fun setHomepage(url: String) = context.browserDataStore.edit { it[Keys.HOMEPAGE_URL] = url }
     suspend fun setStartupBehavior(behavior: StartupBehavior) = context.browserDataStore.edit { it[Keys.STARTUP_BEHAVIOR] = behavior.name }
     suspend fun setLanguage(lang: String) = context.browserDataStore.edit { it[Keys.LANGUAGE] = lang }

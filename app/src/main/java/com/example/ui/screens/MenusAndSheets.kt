@@ -272,7 +272,7 @@ fun MainMenuBottomSheet(
                     )
                     MenuListRow(
                         icon = Icons.Outlined.Security,
-                        title = "WEBLIO Security Center",
+                        title = "Weblo Security Center",
                         showChevron = true,
                         onClick = { onDismiss(); onOpenSecurityCenter() }
                     )

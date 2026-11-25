@@ -26,7 +26,7 @@ enum class SupportLevel(val label: String) {
 }
 
 object BrowserEngineInfo {
-    const val SELECTED_ENGINE = "Android System WebView (Chromium Blink + V8) + androidx.webkit + WEBLIO Extension Runtime"
+    const val SELECTED_ENGINE = "Android System WebView (Chromium Blink + V8) + androidx.webkit + Weblo Extension Runtime"
 
     val engineEvaluations = listOf(
         EngineEvaluationItem(
@@ -35,7 +35,7 @@ object BrowserEngineInfo {
             license = "BSD / Apache 2.0",
             maintenanceStatus = "Actively maintained by Google",
             chromeExtensionSupport = "No native .crx host; supports DocumentStart JS, shouldInterceptRequest, MessagePort, and Multi-Profile via androidx.webkit",
-            verdict = "SELECTED — Secure, zero native binary bloat, real Chromium rendering, augmented with WEBLIO's real WebExtension/UserScript & AdBlock engines."
+            verdict = "SELECTED — Secure, zero native binary bloat, real Chromium rendering, augmented with Weblo's real WebExtension/UserScript & AdBlock engines."
         ),
         EngineEvaluationItem(
             engineName = "Kiwi / Chromium Fork (Custom C++ Build)",
@@ -68,13 +68,13 @@ object BrowserEngineInfo {
             extensionName = "uBlock Origin (Filter & Cosmetic Engine)",
             testedBehavior = "EasyList network blocking via shouldInterceptRequest + cosmetic CSS hiding + anti-adblock scriptlets",
             supportLevel = SupportLevel.FULL_VERIFIED,
-            notes = "Implemented natively in WEBLIO's AdBlockEngine + uBlock Cosmetic Scriptlet extension. Note: Chrome MV3 declarativeNetRequest binary .crx rulesets are not executed directly."
+            notes = "Implemented natively in Weblo's AdBlockEngine + uBlock Cosmetic Scriptlet extension. Note: Chrome MV3 declarativeNetRequest binary .crx rulesets are not executed directly."
         ),
         ExtensionCompatibilityEntry(
             extensionName = "Dark Reader (Dynamic Dark CSS Engine)",
             testedBehavior = "Luminance-preserving CSS injection across visited pages with media inversion correction",
             supportLevel = SupportLevel.FULL_VERIFIED,
-            notes = "Verified working via WEBLIO's Dark Reader Engine extension and Chromium Algorithmic Darkening."
+            notes = "Verified working via Weblo's Dark Reader Engine extension and Chromium Algorithmic Darkening."
         ),
         ExtensionCompatibilityEntry(
             extensionName = "Tampermonkey (UserScripts .user.js)",
@@ -86,13 +86,13 @@ object BrowserEngineInfo {
             extensionName = "Privacy Badger (Tracker & Beacon Guard)",
             testedBehavior = "Third-party cookie blocking, tracking query parameter stripping, sendBeacon tracker filtering",
             supportLevel = SupportLevel.FULL_VERIFIED,
-            notes = "Verified working via WEBLIO's Privacy Badger Guard + AdBlockEngine."
+            notes = "Verified working via Weblo's Privacy Badger Guard + AdBlockEngine."
         ),
         ExtensionCompatibilityEntry(
             extensionName = "Bitwarden (Password Vault Autofill)",
-            testedBehavior = "Login form detection and encrypted autofill from WEBLIO Keystore Vault",
+            testedBehavior = "Login form detection and encrypted autofill from Weblo Keystore Vault",
             supportLevel = SupportLevel.PARTIAL_SHIM,
-            notes = "WEBLIO provides its own hardware Keystore-encrypted vault & autofill bridge. Arbitrary Chrome Web Store Bitwarden .crx popup/background workers require full Chromium C++ extension runtime."
+            notes = "Weblo provides its own hardware Keystore-encrypted vault & autofill bridge. Arbitrary Chrome Web Store Bitwarden .crx popup/background workers require full Chromium C++ extension runtime."
         ),
         ExtensionCompatibilityEntry(
             extensionName = "Arbitrary Chrome Web Store .crx / .zip Bundles",
