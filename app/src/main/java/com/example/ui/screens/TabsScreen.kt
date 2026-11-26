@@ -32,15 +32,22 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ViewList
+import androidx.compose.material.icons.automirrored.filled.VolumeOff
+import androidx.compose.material.icons.automirrored.filled.VolumeUp
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.ContentCopy
 import androidx.compose.material.icons.filled.DeleteSweep
 import androidx.compose.material.icons.filled.Folder
+import androidx.compose.material.icons.filled.Forward10
+import androidx.compose.material.icons.filled.GraphicEq
 import androidx.compose.material.icons.filled.GridView
 import androidx.compose.material.icons.filled.History
 import androidx.compose.material.icons.filled.MoreVert
+import androidx.compose.material.icons.filled.Pause
+import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.Public
+import androidx.compose.material.icons.filled.Replay10
 import androidx.compose.material.icons.filled.Restore
 import androidx.compose.material.icons.filled.VisibilityOff
 import androidx.compose.material3.AlertDialog
@@ -103,7 +110,11 @@ fun TabsScreen(
     onReopenClosed: (ClosedTabEntity) -> Unit,
     onBack: () -> Unit,
     tabPreviews: Map<Long, Bitmap> = emptyMap(),
-    tabRuntimeMap: Map<Long, TabRuntimeState> = emptyMap()
+    tabRuntimeMap: Map<Long, TabRuntimeState> = emptyMap(),
+    onToggleMuteTab: (Long) -> Unit = {},
+    onToggleMediaPlayPause: (Long) -> Unit = {},
+    onSeekMedia: (Long, Int) -> Unit = { _, _ -> },
+    onMuteAllPlaying: () -> Unit = {}
 ) {
     var showIncognito by remember { mutableIntStateOf(0) } // 0 = Normal, 1 = Private, 2 = Recently Closed
     var isGridView by remember { mutableStateOf(true) }
@@ -368,6 +379,131 @@ fun TabsScreen(
                     }
                 }
 
+                val mediaTabs = activeSource.filter { t ->
+                    val rt = tabRuntimeMap[t.id]
+                    rt?.isMediaPlaying == true || rt?.hasMediaSession == true
+                }
+                if (mediaTabs.isNotEmpty()) {
+                    val primaryMediaTab = mediaTabs.firstOrNull { tabRuntimeMap[it.id]?.isMediaPlaying == true }
+                        ?: mediaTabs.first()
+                    val mediaRt = tabRuntimeMap[primaryMediaTab.id]
+                    val mediaPlaying = mediaRt?.isMediaPlaying == true
+                    val mediaMuted = mediaRt?.isAudioMuted == true
+                    val mediaUrl = mediaRt?.currentUrl ?: primaryMediaTab.url
+                    val mediaDisplayTitle = mediaRt?.mediaTitle?.takeIf { it.isNotBlank() }
+                        ?: resolveTabDisplayTitle(primaryMediaTab, mediaRt, mediaUrl)
+                    val hostLabel = BrowserViewModel.extractHost(mediaUrl).ifBlank { "Playing Media" }
+
+                    Surface(
+                        shape = RoundedCornerShape(18.dp),
+                        color = MaterialTheme.colorScheme.surfaceVariant,
+                        border = BorderStroke(
+                            width = 1.dp,
+                            color = if (mediaMuted) MaterialTheme.colorScheme.error.copy(alpha = 0.45f)
+                            else WeblioCyan.copy(alpha = 0.45f)
+                        ),
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(horizontal = 16.dp, vertical = 6.dp)
+                            .testTag("tabs_media_controller_card_${primaryMediaTab.id}")
+                    ) {
+                        Column(
+                            modifier = Modifier.padding(horizontal = 12.dp, vertical = 10.dp),
+                            verticalArrangement = Arrangement.spacedBy(6.dp)
+                        ) {
+                            Row(
+                                modifier = Modifier.fillMaxWidth(),
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                Icon(
+                                    imageVector = if (mediaMuted) Icons.AutoMirrored.Filled.VolumeOff else Icons.Filled.GraphicEq,
+                                    contentDescription = null,
+                                    tint = if (mediaMuted) MaterialTheme.colorScheme.error else WeblioCyan,
+                                    modifier = Modifier.size(18.dp)
+                                )
+                                Spacer(Modifier.width(8.dp))
+                                Column(
+                                    modifier = Modifier
+                                        .weight(1f)
+                                        .clip(RoundedCornerShape(8.dp))
+                                        .clickable {
+                                            onSelectTab(primaryMediaTab.id)
+                                            onBack()
+                                        }
+                                ) {
+                                    Text(
+                                        text = mediaDisplayTitle,
+                                        style = MaterialTheme.typography.labelLarge.copy(fontWeight = FontWeight.SemiBold),
+                                        maxLines = 1,
+                                        overflow = TextOverflow.Ellipsis
+                                    )
+                                    Text(
+                                        text = if (mediaMuted) "$hostLabel • Muted" else if (mediaPlaying) "$hostLabel • Playing" else "$hostLabel • Paused",
+                                        style = MaterialTheme.typography.labelSmall,
+                                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                        maxLines = 1,
+                                        overflow = TextOverflow.Ellipsis
+                                    )
+                                }
+                                if (mediaTabs.count { tabRuntimeMap[it.id]?.isAudioMuted != true } > 1) {
+                                    TextButton(
+                                        onClick = onMuteAllPlaying,
+                                        modifier = Modifier.testTag("tabs_mute_all_button")
+                                    ) {
+                                        Text("Mute all", style = MaterialTheme.typography.labelMedium)
+                                    }
+                                }
+                            }
+                            Row(
+                                modifier = Modifier.fillMaxWidth(),
+                                horizontalArrangement = Arrangement.SpaceEvenly,
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                IconButton(
+                                    onClick = { onSeekMedia(primaryMediaTab.id, -10) },
+                                    modifier = Modifier
+                                        .size(48.dp)
+                                        .testTag("media_ctrl_rewind_${primaryMediaTab.id}")
+                                ) {
+                                    Icon(Icons.Filled.Replay10, contentDescription = "Rewind 10 seconds")
+                                }
+                                IconButton(
+                                    onClick = { onToggleMediaPlayPause(primaryMediaTab.id) },
+                                    modifier = Modifier
+                                        .size(48.dp)
+                                        .testTag("media_ctrl_play_pause_${primaryMediaTab.id}")
+                                ) {
+                                    Icon(
+                                        imageVector = if (mediaPlaying) Icons.Filled.Pause else Icons.Filled.PlayArrow,
+                                        contentDescription = if (mediaPlaying) "Pause media" else "Play media",
+                                        tint = WeblioCyan
+                                    )
+                                }
+                                IconButton(
+                                    onClick = { onSeekMedia(primaryMediaTab.id, 10) },
+                                    modifier = Modifier
+                                        .size(48.dp)
+                                        .testTag("media_ctrl_forward_${primaryMediaTab.id}")
+                                ) {
+                                    Icon(Icons.Filled.Forward10, contentDescription = "Forward 10 seconds")
+                                }
+                                IconButton(
+                                    onClick = { onToggleMuteTab(primaryMediaTab.id) },
+                                    modifier = Modifier
+                                        .size(48.dp)
+                                        .testTag("media_ctrl_mute_${primaryMediaTab.id}")
+                                ) {
+                                    Icon(
+                                        imageVector = if (mediaMuted) Icons.AutoMirrored.Filled.VolumeOff else Icons.AutoMirrored.Filled.VolumeUp,
+                                        contentDescription = if (mediaMuted) "Unmute tab audio" else "Mute tab audio",
+                                        tint = if (mediaMuted) MaterialTheme.colorScheme.error else WeblioCyan
+                                    )
+                                }
+                            }
+                        }
+                    }
+                }
+
                 if (filteredTabs.isEmpty()) {
                     Box(
                         modifier = Modifier.fillMaxSize(),
@@ -414,7 +550,8 @@ fun TabsScreen(
                                 },
                                 onClose = { onCloseTab(tab) },
                                 onDuplicate = { onDuplicateTab(tab) },
-                                onGroupClick = { groupDialogTab = tab }
+                                onGroupClick = { groupDialogTab = tab },
+                                onToggleMute = { onToggleMuteTab(tab.id) }
                             )
                         }
                     }
@@ -436,7 +573,8 @@ fun TabsScreen(
                                 },
                                 onClose = { onCloseTab(tab) },
                                 onDuplicate = { onDuplicateTab(tab) },
-                                onGroupClick = { groupDialogTab = tab }
+                                onGroupClick = { groupDialogTab = tab },
+                                onToggleMute = { onToggleMuteTab(tab.id) }
                             )
                         }
                     }
@@ -534,10 +672,14 @@ private fun TabPreviewCard(
     onSelect: () -> Unit,
     onClose: () -> Unit,
     onDuplicate: () -> Unit,
-    onGroupClick: () -> Unit
+    onGroupClick: () -> Unit,
+    onToggleMute: () -> Unit = {}
 ) {
     val liveUrl = runtime?.currentUrl ?: tab.url
     val displayTitle = resolveTabDisplayTitle(tab, runtime, liveUrl)
+    val isPlaying = runtime?.isMediaPlaying == true
+    val isMuted = runtime?.isAudioMuted == true
+    val showAudioIndicator = isPlaying || isMuted || runtime?.hasMediaSession == true
     val frameColor = when {
         isActive && tab.isIncognito -> WeblioIncognitoAccent
         isActive -> WeblioPeriwinkle
@@ -557,7 +699,7 @@ private fun TabPreviewCard(
             .testTag("tab_card_${tab.id}")
     ) {
         Column(modifier = Modifier.fillMaxSize()) {
-            // Card Header with Favicon + Website Title + Close
+            // Card Header with Favicon + Website Title + Audio Indicator + Close
             Row(
                 modifier = Modifier
                     .fillMaxWidth()
@@ -593,6 +735,29 @@ private fun TabPreviewCard(
                     overflow = TextOverflow.Ellipsis,
                     modifier = Modifier.weight(1f)
                 )
+                if (showAudioIndicator) {
+                    Box(
+                        modifier = Modifier
+                            .padding(end = 4.dp)
+                            .clip(CircleShape)
+                            .background(
+                                if (isMuted) Color(0xFFE53935).copy(alpha = 0.2f)
+                                else if (isActive) Color(0xFF141414).copy(alpha = 0.14f)
+                                else WeblioCyan.copy(alpha = 0.2f)
+                            )
+                            .clickable(onClick = onToggleMute)
+                            .padding(horizontal = 6.dp, vertical = 4.dp)
+                            .testTag("tab_mute_button_${tab.id}"),
+                        contentAlignment = Alignment.Center
+                    ) {
+                        Icon(
+                            imageVector = if (isMuted) Icons.AutoMirrored.Filled.VolumeOff else Icons.AutoMirrored.Filled.VolumeUp,
+                            contentDescription = if (isMuted) "Unmute tab" else "Mute tab",
+                            tint = if (isMuted) Color(0xFFFF5252) else if (isActive) Color(0xFF141414) else WeblioCyan,
+                            modifier = Modifier.size(15.dp)
+                        )
+                    }
+                }
                 IconButton(
                     onClick = onClose,
                     modifier = Modifier.size(26.dp)
@@ -758,10 +923,14 @@ private fun TabListRow(
     onSelect: () -> Unit,
     onClose: () -> Unit,
     onDuplicate: () -> Unit,
-    onGroupClick: () -> Unit
+    onGroupClick: () -> Unit,
+    onToggleMute: () -> Unit = {}
 ) {
     val liveUrl = runtime?.currentUrl ?: tab.url
     val displayTitle = resolveTabDisplayTitle(tab, runtime, liveUrl)
+    val isPlaying = runtime?.isMediaPlaying == true
+    val isMuted = runtime?.isAudioMuted == true
+    val showAudioIndicator = isPlaying || isMuted || runtime?.hasMediaSession == true
     Surface(
         shape = RoundedCornerShape(16.dp),
         border = if (isActive) BorderStroke(1.5.dp, WeblioPeriwinkle) else null,
@@ -814,6 +983,18 @@ private fun TabListRow(
                 Text(liveUrl, maxLines = 1, overflow = TextOverflow.Ellipsis, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
                 tab.groupName?.let {
                     Text("Group: $it", style = MaterialTheme.typography.labelSmall, color = WeblioCyan)
+                }
+            }
+            if (showAudioIndicator) {
+                IconButton(
+                    onClick = onToggleMute,
+                    modifier = Modifier.testTag("tab_list_mute_button_${tab.id}")
+                ) {
+                    Icon(
+                        imageVector = if (isMuted) Icons.AutoMirrored.Filled.VolumeOff else Icons.AutoMirrored.Filled.VolumeUp,
+                        contentDescription = if (isMuted) "Unmute tab" else "Mute tab",
+                        tint = if (isMuted) MaterialTheme.colorScheme.error else WeblioCyan
+                    )
                 }
             }
             IconButton(onClick = onGroupClick) { Icon(Icons.Filled.Folder, contentDescription = "Group") }

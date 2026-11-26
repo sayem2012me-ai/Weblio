@@ -24,12 +24,18 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.KeyboardArrowRight
+import androidx.compose.material.icons.automirrored.filled.VolumeOff
+import androidx.compose.material.icons.automirrored.filled.VolumeUp
 import androidx.compose.material.icons.filled.Close
+import androidx.compose.material.icons.filled.Forward10
+import androidx.compose.material.icons.filled.GraphicEq
 import androidx.compose.material.icons.filled.GridView
 import androidx.compose.material.icons.filled.MoreVert
+import androidx.compose.material.icons.filled.Pause
 import androidx.compose.material.icons.filled.Person
 import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.PushPin
+import androidx.compose.material.icons.filled.Replay10
 import androidx.compose.material.icons.outlined.AddBox
 import androidx.compose.material.icons.outlined.BookmarkBorder
 import androidx.compose.material.icons.outlined.Bookmarks
@@ -319,7 +325,14 @@ fun BrowserToolsBottomSheet(
     onToggleSiteAdBlock: () -> Unit,
     onEnterPip: () -> Unit,
     onOpenSitePermissions: () -> Unit,
-    onOpenAdBlockDashboard: () -> Unit
+    onOpenAdBlockDashboard: () -> Unit,
+    isMediaPlaying: Boolean = false,
+    isAudioMuted: Boolean = false,
+    hasMediaSession: Boolean = false,
+    mediaTitle: String = "",
+    onToggleMediaPlayPause: () -> Unit = {},
+    onToggleAudioMute: () -> Unit = {},
+    onSeekMedia: (Int) -> Unit = {}
 ) {
     val isWebPage = currentUrl != "weblio://home" && currentUrl.isNotBlank()
     ModalBottomSheet(
@@ -335,6 +348,63 @@ fun BrowserToolsBottomSheet(
             verticalArrangement = Arrangement.spacedBy(16.dp)
         ) {
             Text("Browser Tools", style = MaterialTheme.typography.titleLarge)
+
+            if (isWebPage && (isMediaPlaying || hasMediaSession || isAudioMuted)) {
+                Surface(
+                    shape = RoundedCornerShape(18.dp),
+                    color = MaterialTheme.colorScheme.surfaceVariant,
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .testTag("tools_media_controller_card")
+                ) {
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(horizontal = 12.dp, vertical = 8.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Icon(
+                            imageVector = if (isAudioMuted) Icons.AutoMirrored.Filled.VolumeOff else Icons.Filled.GraphicEq,
+                            contentDescription = null,
+                            tint = if (isAudioMuted) MaterialTheme.colorScheme.error else WeblioCyan,
+                            modifier = Modifier.size(18.dp)
+                        )
+                        Spacer(Modifier.width(8.dp))
+                        Text(
+                            text = mediaTitle.ifBlank { "Page Media" },
+                            style = MaterialTheme.typography.labelLarge,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis,
+                            modifier = Modifier.weight(1f)
+                        )
+                        IconButton(onClick = { onSeekMedia(-10) }) {
+                            Icon(Icons.Filled.Replay10, contentDescription = "Rewind 10 seconds")
+                        }
+                        IconButton(
+                            onClick = onToggleMediaPlayPause,
+                            modifier = Modifier.testTag("tools_media_play_pause")
+                        ) {
+                            Icon(
+                                imageVector = if (isMediaPlaying) Icons.Filled.Pause else Icons.Filled.PlayArrow,
+                                contentDescription = if (isMediaPlaying) "Pause" else "Play"
+                            )
+                        }
+                        IconButton(onClick = { onSeekMedia(10) }) {
+                            Icon(Icons.Filled.Forward10, contentDescription = "Forward 10 seconds")
+                        }
+                        IconButton(
+                            onClick = onToggleAudioMute,
+                            modifier = Modifier.testTag("tools_media_mute_button")
+                        ) {
+                            Icon(
+                                imageVector = if (isAudioMuted) Icons.AutoMirrored.Filled.VolumeOff else Icons.AutoMirrored.Filled.VolumeUp,
+                                contentDescription = if (isAudioMuted) "Unmute tab" else "Mute tab",
+                                tint = if (isAudioMuted) MaterialTheme.colorScheme.error else WeblioCyan
+                            )
+                        }
+                    }
+                }
+            }
 
             FlowRow(
                 modifier = Modifier.fillMaxWidth(),

@@ -460,4 +460,212 @@ class ExampleRobolectricTest {
             org.robolectric.shadows.ShadowLooper.idleMainLooper()
         }
     }
+
+    @Test
+    fun `qr scanner decodes standard, row-stride padded YUV frames, and inverted dark-mode QR codes`() {
+        val payload = "https://weblio.example/qr-ok?x=1"
+        val size = 240
+        val matrix = com.google.zxing.qrcode.QRCodeWriter().encode(
+            payload,
+            com.google.zxing.BarcodeFormat.QR_CODE,
+            size,
+            size
+        )
+
+        val normalBmp = android.graphics.Bitmap.createBitmap(size, size, android.graphics.Bitmap.Config.ARGB_8888)
+        val invertedBmp = android.graphics.Bitmap.createBitmap(size, size, android.graphics.Bitmap.Config.ARGB_8888)
+        val tightY = ByteArray(size * size)
+        val invertedY = ByteArray(size * size)
+        val rowStride = size + 64
+        val paddedY = ByteArray(size * rowStride) { 0x55.toByte() }
+
+        for (y in 0 until size) {
+            for (x in 0 until size) {
+                val black = matrix.get(x, y)
+                normalBmp.setPixel(x, y, if (black) android.graphics.Color.BLACK else android.graphics.Color.WHITE)
+                invertedBmp.setPixel(x, y, if (black) android.graphics.Color.WHITE else android.graphics.Color.BLACK)
+
+                val luma: Byte = if (black) 16.toByte() else 235.toByte()
+                val invLuma: Byte = if (black) 235.toByte() else 16.toByte()
+                tightY[y * size + x] = luma
+                invertedY[y * size + x] = invLuma
+                paddedY[y * rowStride + x] = luma
+            }
+        }
+
+        val reader = com.example.ui.screens.QrScannerDecoder.createQrReader()
+        assertEquals(payload, com.example.ui.screens.QrScannerDecoder.decodeFromBitmap(normalBmp, reader))
+        assertEquals(payload, com.example.ui.screens.QrScannerDecoder.decodeFromBitmap(invertedBmp, reader))
+        assertEquals(payload, com.example.ui.screens.QrScannerDecoder.decodeFromYuvBytes(tightY, size, size, size, 1, reader))
+        assertEquals(payload, com.example.ui.screens.QrScannerDecoder.decodeFromYuvBytes(paddedY, size, size, rowStride, 1, reader))
+        assertEquals(payload, com.example.ui.screens.QrScannerDecoder.decodeFromYuvBytes(invertedY, size, size, size, 1, reader))
+    }
+
+    @Test
+    fun `browser import manager discovers installed browsers excluding self`() {
+        val shadowPm = org.robolectric.Shadows.shadowOf(context.packageManager)
+        val chromeIcon = android.graphics.drawable.ColorDrawable(android.graphics.Color.RED)
+        val firefoxIcon = android.graphics.drawable.ColorDrawable(android.graphics.Color.BLUE)
+
+        val httpsIntent = android.content.Intent(
+            android.content.Intent.ACTION_VIEW,
+            android.net.Uri.parse("https://example.com")
+        ).apply { addCategory(android.content.Intent.CATEGORY_BROWSABLE) }
+
+        val chromeRi = android.content.pm.ResolveInfo().apply {
+            activityInfo = android.content.pm.ActivityInfo().apply {
+                packageName = "com.android.chrome"
+                name = "com.google.android.apps.chrome.Main"
+            }
+            nonLocalizedLabel = "Chrome"
+        }
+        val firefoxRi = android.content.pm.ResolveInfo().apply {
+            activityInfo = android.content.pm.ActivityInfo().apply {
+                packageName = "org.mozilla.firefox"
+                name = "org.mozilla.fenix.App"
+            }
+            nonLocalizedLabel = "Firefox"
+        }
+        val selfRi = android.content.pm.ResolveInfo().apply {
+            activityInfo = android.content.pm.ActivityInfo().apply {
+                packageName = context.packageName
+                name = "com.example.MainActivity"
+            }
+            nonLocalizedLabel = "Weblo"
+        }
+
+        shadowPm.addResolveInfoForIntent(httpsIntent, chromeRi)
+        shadowPm.addResolveInfoForIntent(httpsIntent, firefoxRi)
+        shadowPm.addResolveInfoForIntent(httpsIntent, selfRi)
+        shadowPm.setApplicationIcon("com.android.chrome", chromeIcon)
+        shadowPm.setApplicationIcon("org.mozilla.firefox", firefoxIcon)
+
+        val importer = com.example.engine.BrowserImportManager(repo)
+        val discovered = importer.discoverInstalledBrowsers(context)
+
+        assertTrue(discovered.any { it.packageName == "com.android.chrome" && it.appName == "Chrome" })
+        assertTrue(discovered.any { it.packageName == "org.mozilla.firefox" && it.appName == "Firefox" })
+        assertFalse(discovered.any { it.packageName == context.packageName })
+    }
+
+    @Test
+    fun `browser import manager imports history JSON bookmarks HTML and passwords CSV cleanly`() = runTest {
+        val pid = repo.ensureDefaultsSeeded()
+        val importer = com.example.engine.BrowserImportManager(repo)
+
+        val chromeHistoryJson = """
+            {
+              "Browser History": [
+                {
+                  "title": "GitHub Dashboard",
+                  "url": "https://github.com/dashboard",
+                  "time_usec": 1730000000000000
+                },
+                {
+                  "title": "Kotlin Reference",
+                  "url": "https://kotlinlang.org/docs/home.html",
+                  "time_usec": 1730000500000000
+                }
+              ]
+            }
+        """.trimIndent()
+
+        val htmlBookmarks = """
+            <!DOCTYPE NETSCAPE-Bookmark-file-1>
+            <DL><p>
+              <DT><H3>Tech Reads</H3>
+              <DL><p>
+                <DT><A HREF="https://developer.android.com/jetpack" ADD_DATE="1730000100">Android Jetpack</A>
+              </DL><p>
+            </DL><p>
+        """.trimIndent()
+
+        val passwordsCsv = """
+            name,url,username,password
+            Example Portal,https://portal.example.org/login,bob@example.org,P@ssw0rd!42
+        """.trimIndent()
+
+        val r1 = importer.parseAndImport(pid, chromeHistoryJson, "Chrome")
+        val r2 = importer.parseAndImport(pid, htmlBookmarks, "Chrome")
+        val r3 = importer.parseAndImport(pid, passwordsCsv, "Chrome")
+
+        assertEquals(2, r1.historyCount)
+        assertTrue(r1.quickLinkCount > 0)
+        assertEquals(1, r2.bookmarkCount)
+        assertEquals(1, r3.passwordCount)
+
+        // Duplicate import should not duplicate history or bookmarks
+        val r1Dup = importer.parseAndImport(pid, chromeHistoryJson, "Chrome")
+        assertEquals(0, r1Dup.historyCount)
+
+        val history = repo.observeHistory(pid).first()
+        assertEquals(2, history.size)
+        assertTrue(history.any { it.url == "https://github.com/dashboard" })
+
+        val bookmarks = repo.observeBookmarks(pid).first()
+        assertTrue(bookmarks.any { it.url == "https://developer.android.com/jetpack" && it.folder == "Tech Reads" })
+
+        val savedPw = repo.getPasswordsForHost(pid, "portal.example.org")
+        assertEquals(1, savedPw.size)
+        assertEquals("P@ssw0rd!42", savedPw.first().second)
+    }
+
+    @Test
+    fun `tab audio mute state and media controller JS builders work cleanly`() {
+        val app = ApplicationProvider.getApplicationContext<WeblioApplication>()
+        val vmStore = androidx.lifecycle.ViewModelStore()
+        val vm = androidx.lifecycle.ViewModelProvider(
+            vmStore,
+            androidx.lifecycle.ViewModelProvider.AndroidViewModelFactory(app)
+        )[com.example.ui.BrowserViewModel::class.java]
+
+        try {
+            vm.updateRuntimeState(101L) {
+                it.copy(
+                    currentUrl = "https://youtube.com/watch?v=abc",
+                    title = "Music Mix",
+                    isMediaPlaying = true,
+                    hasMediaSession = true,
+                    mediaTitle = "Synthwave Live"
+                )
+            }
+            vm.updateRuntimeState(102L) {
+                it.copy(
+                    currentUrl = "https://podcast.example.org/ep1",
+                    title = "Tech Podcast",
+                    isMediaPlaying = true,
+                    hasMediaSession = true,
+                    mediaTitle = "Episode 1"
+                )
+            }
+
+            assertFalse(vm.isTabMuted(101L))
+            vm.toggleTabMute(101L)
+            assertTrue(vm.isTabMuted(101L))
+            vm.toggleTabMute(101L)
+            assertFalse(vm.isTabMuted(101L))
+
+            vm.muteAllPlayingTabs()
+            assertTrue(vm.isTabMuted(101L))
+            assertTrue(vm.isTabMuted(102L))
+
+            vm.setTabMuted(101L, false)
+            assertFalse(vm.isTabMuted(101L))
+            vm.handleMediaServiceCommand("toggle_mute")
+            assertTrue(vm.isTabMuted(101L))
+
+            val muteJs = com.example.ui.BrowserViewModel.buildTabMuteJs(true)
+            assertTrue(muteJs.contains("window.__weblioTabMuted = true"))
+            assertTrue(muteJs.contains("window.__weblioSetMuted(true)"))
+
+            val seekJs = com.example.ui.BrowserViewModel.buildMediaCommandJs("seek", -10)
+            assertTrue(seekJs.contains("__weblioSeekBy"))
+            assertTrue(seekJs.contains("-10"))
+
+            val togglePlayJs = com.example.ui.BrowserViewModel.buildMediaCommandJs("toggle_play")
+            assertTrue(togglePlayJs.contains("__weblioTogglePlayPause"))
+        } finally {
+            vmStore.clear()
+        }
+    }
 }

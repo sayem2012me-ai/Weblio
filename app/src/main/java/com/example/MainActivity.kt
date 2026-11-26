@@ -2,7 +2,10 @@ package com.example
 
 import android.app.PictureInPictureParams
 import android.app.role.RoleManager
+import android.content.BroadcastReceiver
+import android.content.Context
 import android.content.Intent
+import android.content.IntentFilter
 import android.os.Build
 import android.os.Bundle
 import android.provider.Settings
@@ -109,6 +112,7 @@ import com.example.ui.screens.ExtensionsQuickPopup
 import com.example.ui.screens.ExtensionsScreen
 import com.example.ui.screens.HistoryScreen
 import com.example.ui.screens.HomeScreen
+import com.example.ui.screens.ImportBrowserDataScreen
 import com.example.ui.screens.MainMenuBottomSheet
 import com.example.ui.screens.PasswordManagerScreen
 import com.example.ui.screens.ProfilesScreen
@@ -176,13 +180,29 @@ class MainActivity : FragmentActivity() {
         }
     }
 
+    private val mediaActionReceiver = object : BroadcastReceiver() {
+        override fun onReceive(context: Context?, intent: Intent?) {
+            val cmd = intent?.getStringExtra("cmd").orEmpty()
+            if (cmd.isNotEmpty()) {
+                viewModel.handleMediaServiceCommand(cmd)
+            }
+        }
+    }
+
     override fun onStart() {
         super.onStart()
+        ContextCompat.registerReceiver(
+            this,
+            mediaActionReceiver,
+            IntentFilter(com.example.engine.WeblioMediaService.BROADCAST_MEDIA_ACTION),
+            ContextCompat.RECEIVER_NOT_EXPORTED
+        )
         viewModel.onAppResumed()
     }
 
     override fun onStop() {
         super.onStop()
+        runCatching { unregisterReceiver(mediaActionReceiver) }
         if (!isChangingConfigurations) {
             viewModel.onAppBackgrounded()
         }
@@ -456,6 +476,9 @@ private fun WeblioAppRoot(
                                                 launchSingleTop = true
                                             }
                                         },
+                                        isMediaPlaying = runtime?.isMediaPlaying == true,
+                                        isAudioMuted = runtime?.isAudioMuted == true,
+                                        onToggleMuteClick = { viewModel.toggleTabMute(currentTab.id) },
                                         modifier = Modifier.weight(1f)
                                     )
                                     Spacer(Modifier.width(4.dp))
@@ -736,7 +759,14 @@ private fun WeblioAppRoot(
                     onToggleSiteAdBlock = { viewModel.toggleSiteAdBlock(host) },
                     onEnterPip = onEnterPip,
                     onOpenSitePermissions = { navController.navigate(WeblioRoute.SitePermissions) },
-                    onOpenAdBlockDashboard = { navController.navigate(WeblioRoute.AdBlock) }
+                    onOpenAdBlockDashboard = { navController.navigate(WeblioRoute.AdBlock) },
+                    isMediaPlaying = runtime?.isMediaPlaying == true,
+                    isAudioMuted = runtime?.isAudioMuted == true,
+                    hasMediaSession = runtime?.hasMediaSession == true,
+                    mediaTitle = runtime?.mediaTitle?.takeIf { it.isNotBlank() } ?: (runtime?.title ?: currentTab?.title.orEmpty()),
+                    onToggleMediaPlayPause = { currentTab?.let { viewModel.toggleTabMediaPlayPause(it.id) } },
+                    onToggleAudioMute = { currentTab?.let { viewModel.toggleTabMute(it.id) } },
+                    onSeekMedia = { delta -> currentTab?.let { viewModel.seekTabMedia(it.id, delta) } }
                 )
             }
         }
@@ -759,7 +789,11 @@ private fun WeblioAppRoot(
                 onReopenClosed = { viewModel.reopenClosedTab(it) },
                 onBack = { navController.popBackStack() },
                 tabPreviews = tabPreviews,
-                tabRuntimeMap = tabRuntimeMap
+                tabRuntimeMap = tabRuntimeMap,
+                onToggleMuteTab = { viewModel.toggleTabMute(it) },
+                onToggleMediaPlayPause = { viewModel.toggleTabMediaPlayPause(it) },
+                onSeekMedia = { id, delta -> viewModel.seekTabMedia(id, delta) },
+                onMuteAllPlaying = { viewModel.muteAllPlayingTabs() }
             )
         }
 
@@ -923,7 +957,17 @@ private fun WeblioAppRoot(
                 onOpenSitePermissions = { navController.navigate(WeblioRoute.SitePermissions) },
                 onOpenBackupRestore = { navController.navigate(WeblioRoute.BackupRestore) },
                 onBack = { navController.popBackStack() },
-                onOpenSecurityCenter = { navController.navigate(WeblioRoute.SecurityCenter) { launchSingleTop = true } }
+                onOpenSecurityCenter = { navController.navigate(WeblioRoute.SecurityCenter) { launchSingleTop = true } },
+                onOpenImportData = { navController.navigate(WeblioRoute.ImportData) { launchSingleTop = true } }
+            )
+        }
+
+        composable<WeblioRoute.ImportData> {
+            ImportBrowserDataScreen(
+                profileId = activeProfile?.id ?: 1L,
+                importManager = viewModel.importManager,
+                onShowMessage = { viewModel.showMessage(it) },
+                onBack = { navController.popBackStack() }
             )
         }
 

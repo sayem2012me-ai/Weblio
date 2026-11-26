@@ -301,13 +301,21 @@ fun BrowserWebViewContainer(
                                 return@post
                             }
                             val safeTitle = title.trim().take(120)
-                            viewModel.updateRuntimeState(tab.id) { it.copy(isMediaPlaying = playing) }
+                            val isMutedNow = viewModel.isTabMuted(tab.id)
+                            viewModel.updateRuntimeState(tab.id) {
+                                it.copy(
+                                    isMediaPlaying = playing,
+                                    hasMediaSession = it.hasMediaSession || playing,
+                                    mediaTitle = safeTitle.ifBlank { it.mediaTitle.ifBlank { tab.title } }
+                                )
+                            }
                             if (playing) {
                                 val svc = Intent(context, WeblioMediaService::class.java).apply {
                                     action = WeblioMediaService.ACTION_START
                                     putExtra(WeblioMediaService.EXTRA_TITLE, safeTitle.ifBlank { tab.title })
                                     putExtra(WeblioMediaService.EXTRA_HOST, realHost)
                                     putExtra(WeblioMediaService.EXTRA_IS_PLAYING, true)
+                                    putExtra(WeblioMediaService.EXTRA_IS_MUTED, isMutedNow)
                                 }
                                 runCatching {
                                     if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
@@ -316,7 +324,7 @@ fun BrowserWebViewContainer(
                                         context.startService(svc)
                                     }
                                 }
-                            } else {
+                            } else if (viewModel.tabRuntime.value.values.none { it.isMediaPlaying }) {
                                 val stopSvc = Intent(context, WeblioMediaService::class.java).apply {
                                     action = WeblioMediaService.ACTION_STOP
                                 }
@@ -544,7 +552,10 @@ fun BrowserWebViewContainer(
                         errorBanner = null,
                         canGoBack = view?.canGoBack() ?: false,
                         canGoForward = view?.canGoForward() ?: false,
-                        isDesktopMode = shouldDesktop
+                        isDesktopMode = shouldDesktop,
+                        isMediaPlaying = if (urlChanged) false else it.isMediaPlaying,
+                        hasMediaSession = if (urlChanged) false else it.hasMediaSession,
+                        mediaTitle = if (urlChanged) "" else it.mediaTitle
                     )
                 }
                 if (shouldDesktop) {
@@ -1300,10 +1311,59 @@ private fun injectCoreBrowserHelpers(
     // Never inject credential capture or saved password autofill into local HTML file previews
     if (host.equals(WeblioDownloadManager.LOCAL_PREVIEW_HOST, ignoreCase = true)) return
     val quotedNativeToken = JSONObject.quote(nativeBridgeToken)
-    // Password capture & HTML5 media playback observer
+    val initialMuted = viewModel.isTabMuted(tab.id)
+    // Password capture & capture-phase HTML5 Audio/Video + Tab Mute controller
     val helperJs = """
         ;(function(){
             var __NATIVE_TOKEN__ = $quotedNativeToken;
+            window.__weblioTabMuted = $initialMuted;
+
+            window.__weblioSetMuted = function(muted) {
+                window.__weblioTabMuted = !!muted;
+                try {
+                    document.querySelectorAll('video, audio').forEach(function(el) {
+                        el.muted = !!muted;
+                    });
+                } catch(e) {}
+            };
+
+            window.__weblioTogglePlayPause = function() {
+                try {
+                    var els = Array.prototype.slice.call(document.querySelectorAll('video, audio'));
+                    var playing = els.find(function(e){ return !e.paused && !e.ended; });
+                    if (playing) {
+                        playing.pause();
+                    } else {
+                        var cand = els.find(function(e){ return !!e.currentSrc || !!e.src || e.readyState > 0; }) || els[0];
+                        if (cand) cand.play();
+                    }
+                } catch(e) {}
+            };
+
+            window.__weblioSeekBy = function(delta) {
+                try {
+                    var els = Array.prototype.slice.call(document.querySelectorAll('video, audio'));
+                    var target = els.find(function(e){ return !e.paused; })
+                        || els.find(function(e){ return !!e.currentSrc || !!e.src || e.readyState > 0; })
+                        || els[0];
+                    if (target) {
+                        target.currentTime = Math.max(0, (target.currentTime || 0) + delta);
+                    }
+                } catch(e) {}
+            };
+
+            var notifyState = function() {
+                try {
+                    if (!window.WeblioNative) return;
+                    var els = Array.prototype.slice.call(document.querySelectorAll('video, audio'));
+                    var anyPlaying = els.some(function(el){ return !el.paused && !el.ended && el.readyState > 0; });
+                    var mediaTitle = (navigator.mediaSession && navigator.mediaSession.metadata && navigator.mediaSession.metadata.title)
+                        || document.title
+                        || location.hostname;
+                    window.WeblioNative.onMediaStateChanged(__NATIVE_TOKEN__, anyPlaying, mediaTitle);
+                } catch(e) {}
+            };
+
             if (!window.__weblioHelpersBound) {
                 window.__weblioHelpersBound = true;
                 document.addEventListener('submit', function(ev) {
@@ -1320,21 +1380,28 @@ private fun injectCoreBrowserHelpers(
                     } catch(e) {}
                 }, true);
 
-                var bindMedia = function(el) {
-                    if (el.__weblioBound) return;
-                    el.__weblioBound = true;
-                    el.addEventListener('play', function() {
-                        if (window.WeblioNative) window.WeblioNative.onMediaStateChanged(__NATIVE_TOKEN__, true, document.title || location.hostname);
-                    });
-                    el.addEventListener('pause', function() {
-                        if (window.WeblioNative) window.WeblioNative.onMediaStateChanged(__NATIVE_TOKEN__, false, document.title || location.hostname);
-                    });
-                    el.addEventListener('ended', function() {
-                        if (window.WeblioNative) window.WeblioNative.onMediaStateChanged(__NATIVE_TOKEN__, false, document.title || location.hostname);
-                    });
-                };
-                document.querySelectorAll('video, audio').forEach(bindMedia);
+                ['play', 'playing', 'pause', 'ended', 'emptied'].forEach(function(evtName) {
+                    document.addEventListener(evtName, function(ev) {
+                        var t = ev && ev.target;
+                        if (t && (t.tagName === 'VIDEO' || t.tagName === 'AUDIO')) {
+                            if (window.__weblioTabMuted && !t.muted) t.muted = true;
+                            notifyState();
+                        }
+                    }, true);
+                });
+
+                document.addEventListener('volumechange', function(ev) {
+                    var t = ev && ev.target;
+                    if (t && (t.tagName === 'VIDEO' || t.tagName === 'AUDIO')) {
+                        if (window.__weblioTabMuted && !t.muted) {
+                            t.muted = true;
+                        }
+                    }
+                }, true);
             }
+
+            window.__weblioSetMuted(window.__weblioTabMuted);
+            notifyState();
         })();
     """.trimIndent()
     webView.evaluateJavascript(helperJs, null)

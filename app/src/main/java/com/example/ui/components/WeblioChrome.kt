@@ -30,6 +30,8 @@ import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.automirrored.filled.ArrowForward
+import androidx.compose.material.icons.automirrored.filled.VolumeOff
+import androidx.compose.material.icons.automirrored.filled.VolumeUp
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.ArrowDropDown
 import androidx.compose.material.icons.filled.Close
@@ -186,7 +188,10 @@ fun WeblioAddressBar(
     searchEngineLogoUrl: String? = null,
     onSearchEngineClick: (() -> Unit)? = null,
     securityState: SecurityState = SecurityState.PROTECTED,
-    onOpenSearchPage: ((String) -> Unit)? = null
+    onOpenSearchPage: ((String) -> Unit)? = null,
+    isMediaPlaying: Boolean = false,
+    isAudioMuted: Boolean = false,
+    onToggleMuteClick: (() -> Unit)? = null
 ) {
     var editing by remember(urlText) { mutableStateOf(false) }
     var draft by remember(urlText) { mutableStateOf(if (isHome) "" else urlText) }
@@ -474,6 +479,21 @@ fun WeblioAddressBar(
                     )
                 }
             } else {
+                if ((isMediaPlaying || isAudioMuted) && onToggleMuteClick != null) {
+                    IconButton(
+                        onClick = onToggleMuteClick,
+                        modifier = Modifier
+                            .size(36.dp)
+                            .testTag("address_audio_mute_button")
+                    ) {
+                        Icon(
+                            imageVector = if (isAudioMuted) Icons.AutoMirrored.Filled.VolumeOff else Icons.AutoMirrored.Filled.VolumeUp,
+                            contentDescription = if (isAudioMuted) "Unmute tab audio" else "Mute tab audio",
+                            tint = if (isAudioMuted) WeblioDanger else WeblioCyan,
+                            modifier = Modifier.size(19.dp)
+                        )
+                    }
+                }
                 IconButton(
                     onClick = onExtensionsClick,
                     modifier = Modifier

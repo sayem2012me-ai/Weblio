@@ -15,6 +15,7 @@ sealed interface WeblioRoute {
     @Serializable data object Passwords : WeblioRoute
     @Serializable data object Settings : WeblioRoute
     @Serializable data object BackupRestore : WeblioRoute
+    @Serializable data object ImportData : WeblioRoute
     @Serializable data object QrScanner : WeblioRoute
     @Serializable data object SitePermissions : WeblioRoute
     @Serializable data object SecurityCenter : WeblioRoute

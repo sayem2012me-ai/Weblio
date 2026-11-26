@@ -82,6 +82,9 @@ interface BookmarkDao {
     @Insert(onConflict = OnConflictStrategy.REPLACE)
     suspend fun insert(bookmark: BookmarkEntity): Long
 
+    @Insert(onConflict = OnConflictStrategy.REPLACE)
+    suspend fun insertAll(bookmarks: List<BookmarkEntity>)
+
     @Update
     suspend fun update(bookmark: BookmarkEntity)
 
@@ -103,8 +106,14 @@ interface HistoryDao {
     @Query("SELECT * FROM history WHERE profileId = :profileId ORDER BY visitedAt DESC LIMIT 500")
     fun observeHistory(profileId: Long): Flow<List<HistoryEntity>>
 
+    @Query("SELECT * FROM history WHERE profileId = :profileId ORDER BY visitedAt DESC")
+    suspend fun getOnce(profileId: Long): List<HistoryEntity>
+
     @Insert(onConflict = OnConflictStrategy.REPLACE)
     suspend fun insert(entry: HistoryEntity): Long
+
+    @Insert(onConflict = OnConflictStrategy.REPLACE)
+    suspend fun insertAll(entries: List<HistoryEntity>)
 
     @Query("DELETE FROM history WHERE id = :id")
     suspend fun deleteById(id: Long)
@@ -171,6 +180,9 @@ interface QuickLinkDao {
 
     @Insert(onConflict = OnConflictStrategy.REPLACE)
     suspend fun insert(link: QuickLinkEntity): Long
+
+    @Insert(onConflict = OnConflictStrategy.REPLACE)
+    suspend fun insertAll(links: List<QuickLinkEntity>)
 
     @Update
     suspend fun update(link: QuickLinkEntity)

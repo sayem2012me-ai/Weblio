@@ -13,6 +13,7 @@ import com.example.data.db.WeblioDatabase
 import com.example.data.prefs.BrowserPreferences
 import com.example.engine.AdBlockEngine
 import com.example.engine.BackupRestoreManager
+import com.example.engine.BrowserImportManager
 import com.example.engine.ExtensionEngine
 import com.example.engine.FilterUpdateWorker
 import com.example.engine.WeblioDownloadManager
@@ -61,6 +62,8 @@ class WeblioApplication : Application() {
         private set
     lateinit var backupManager: BackupRestoreManager
         private set
+    lateinit var importManager: BrowserImportManager
+        private set
 
     override fun onCreate() {
         super.onCreate()
@@ -76,6 +79,7 @@ class WeblioApplication : Application() {
         integrityManager = AppIntegrityManager(this)
         updateVerifier = SecureUpdateVerifier(this)
         backupManager = BackupRestoreManager(repository, preferences)
+        importManager = BrowserImportManager(repository)
 
         appScope.launch {
             runCatching { Coil.imageLoader(this@WeblioApplication) }

@@ -89,7 +89,8 @@ fun SettingsScreen(
     onOpenSitePermissions: () -> Unit,
     onOpenBackupRestore: () -> Unit,
     onBack: () -> Unit,
-    onOpenSecurityCenter: () -> Unit = {}
+    onOpenSecurityCenter: () -> Unit = {},
+    onOpenImportData: () -> Unit = {}
 ) {
     val context = LocalContext.current
     var showClearDataDialog by remember { mutableStateOf(false) }
@@ -172,6 +173,21 @@ fun SettingsScreen(
                             )
                         }
                     }
+                }
+            }
+            item {
+                SettingsCard {
+                    Text("Import Data", style = MaterialTheme.typography.labelLarge)
+                    Text(
+                        "Import browsing history, bookmarks, passwords, and top sites from other browsers on your phone.",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                    SettingsButtonRow(
+                        title = "Import Data",
+                        onClick = onOpenImportData,
+                        modifier = Modifier.testTag("settings_import_data_button")
+                    )
                 }
             }
 
@@ -657,8 +673,17 @@ private fun SettingsSwitchRow(
 }
 
 @Composable
-private fun SettingsButtonRow(title: String, onClick: () -> Unit) {
-    OutlinedButton(onClick = onClick, modifier = Modifier.fillMaxWidth()) {
+private fun SettingsButtonRow(
+    title: String,
+    onClick: () -> Unit,
+    modifier: Modifier = Modifier
+) {
+    OutlinedButton(
+        onClick = onClick,
+        modifier = modifier
+            .fillMaxWidth()
+            .heightIn(min = 48.dp)
+    ) {
         Text(title)
     }
 }

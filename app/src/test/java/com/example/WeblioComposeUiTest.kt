@@ -24,17 +24,23 @@ import com.example.data.prefs.SearchEngine
 import com.example.ui.BrowserViewModel
 import com.example.ui.TabRuntimeState
 import com.example.ui.components.ExtensionPopupDialog
+import com.example.ui.components.WeblioAddressBar
 import com.example.ui.components.WeblioBottomNavBar
+import com.example.ui.screens.BrowserToolsBottomSheet
 import com.example.ui.screens.DownloadsScreen
 import com.example.ui.screens.ExtensionSecurityReviewDialog
 import com.example.ui.screens.ExtensionsQuickPopup
 import com.example.ui.screens.ExtensionsScreen
 import com.example.ui.screens.HomeScreen
+import com.example.ui.screens.ImportBrowserDataScreen
 import com.example.ui.screens.MainMenuBottomSheet
 import com.example.ui.screens.SearchScreen
 import com.example.ui.screens.SettingsScreen
 import com.example.ui.screens.SplashScreen
 import com.example.ui.screens.TabsScreen
+import com.example.engine.BrowserFamily
+import com.example.engine.BrowserImportManager
+import com.example.engine.InstalledBrowserInfo
 import com.example.ui.theme.AppThemeMode
 import com.example.ui.theme.WeblioGrayBg
 import com.example.ui.theme.WeblioLightBg
@@ -878,5 +884,254 @@ class WeblioComposeUiTest {
         ready = true
         composeRule.waitForIdle()
         assertTrue(finished)
+    }
+
+    @Test
+    fun settingsScreen_showsImportDataButtonAndTriggersCallback() {
+        val app = ApplicationProvider.getApplicationContext<WeblioApplication>()
+        val vmStore = androidx.lifecycle.ViewModelStore()
+        val vm = androidx.lifecycle.ViewModelProvider(
+            vmStore,
+            androidx.lifecycle.ViewModelProvider.AndroidViewModelFactory(app)
+        )[BrowserViewModel::class.java]
+        var importClicked = false
+
+        try {
+            composeRule.setContent {
+                WeblioTheme {
+                    SettingsScreen(
+                        settings = BrowserSettings(),
+                        viewModel = vm,
+                        onOpenExtensions = {},
+                        onOpenAdBlock = {},
+                        onOpenPasswords = {},
+                        onOpenSitePermissions = {},
+                        onOpenBackupRestore = {},
+                        onBack = {},
+                        onOpenImportData = { importClicked = true }
+                    )
+                }
+            }
+            composeRule.waitForIdle()
+            composeRule.onNodeWithTag("settings_list")
+                .performScrollToNode(hasTestTag("settings_import_data_button"))
+            composeRule.onNodeWithTag("settings_import_data_button").assertIsDisplayed().performClick()
+            composeRule.waitForIdle()
+            assertTrue(importClicked)
+        } finally {
+            vmStore.clear()
+        }
+    }
+
+    @Test
+    fun importBrowserDataScreen_rendersInstalledBrowserIconsAndOpensImportDialog() {
+        val app = ApplicationProvider.getApplicationContext<WeblioApplication>()
+        val bmp = Bitmap.createBitmap(32, 32, Bitmap.Config.ARGB_8888)
+        val iconDrawable = android.graphics.drawable.BitmapDrawable(app.resources, bmp)
+        val fakeBrowsers = listOf(
+            InstalledBrowserInfo(
+                packageName = "com.android.chrome",
+                appName = "Chrome",
+                icon = iconDrawable,
+                family = BrowserFamily.CHROME,
+                exportGuideSteps = listOf("Export from Chrome", "Pick files below")
+            ),
+            InstalledBrowserInfo(
+                packageName = "org.mozilla.firefox",
+                appName = "Firefox",
+                icon = iconDrawable,
+                family = BrowserFamily.FIREFOX,
+                exportGuideSteps = listOf("Export from Firefox", "Pick files below")
+            )
+        )
+
+        composeRule.setContent {
+            WeblioTheme {
+                ImportBrowserDataScreen(
+                    profileId = 1L,
+                    importManager = BrowserImportManager(app.repository),
+                    onShowMessage = {},
+                    onBack = {},
+                    discoveredBrowsersOverride = fakeBrowsers
+                )
+            }
+        }
+
+        composeRule.waitForIdle()
+        composeRule.onNodeWithTag("import_browser_card_com.android.chrome").assertIsDisplayed()
+        composeRule.onNodeWithTag("import_browser_card_org.mozilla.firefox").assertIsDisplayed()
+        composeRule.onNodeWithText("Chrome").assertIsDisplayed()
+        composeRule.onNodeWithText("Firefox").assertIsDisplayed()
+
+        composeRule.onNodeWithTag("import_browser_card_com.android.chrome").performClick()
+        composeRule.waitForIdle()
+        composeRule.onNodeWithTag("import_browser_dialog").assertIsDisplayed()
+        composeRule.onNodeWithText("Import from Chrome").assertIsDisplayed()
+        composeRule.onNodeWithTag("import_pick_files_button").assertIsDisplayed()
+        composeRule.onNodeWithTag("import_launch_browser_button").assertIsDisplayed()
+    }
+
+    @Test
+    fun tabsScreen_displaysMediaControllerCardAndOneTapTabMuteButtons() {
+        var mutedTabId: Long? = null
+        var playPauseTabId: Long? = null
+        var seekedTabId: Long? = null
+        var seekDelta: Int? = null
+        var muteAllClicked = false
+
+        val tabs = listOf(
+            TabEntity(id = 21L, profileId = 1L, url = "https://www.youtube.com/watch?v=1", title = "YouTube"),
+            TabEntity(id = 22L, profileId = 1L, url = "https://soundcloud.com/mix", title = "SoundCloud")
+        )
+        val runtimeMap = mapOf(
+            21L to TabRuntimeState(
+                tabId = 21L,
+                currentUrl = "https://www.youtube.com/watch?v=1",
+                title = "Lo-Fi Study Beats",
+                isMediaPlaying = true,
+                hasMediaSession = true,
+                mediaTitle = "Lo-Fi Study Beats",
+                isAudioMuted = false
+            ),
+            22L to TabRuntimeState(
+                tabId = 22L,
+                currentUrl = "https://soundcloud.com/mix",
+                title = "Focus Mix",
+                isMediaPlaying = true,
+                hasMediaSession = true,
+                mediaTitle = "Focus Mix",
+                isAudioMuted = false
+            )
+        )
+
+        composeRule.setContent {
+            WeblioTheme {
+                TabsScreen(
+                    tabs = tabs,
+                    closedTabs = emptyList(),
+                    activeTabId = 21L,
+                    onSelectTab = {},
+                    onNewTab = { _, _ -> },
+                    onCloseTab = {},
+                    onCloseAllTabs = {},
+                    onDuplicateTab = {},
+                    onAssignGroup = { _, _ -> },
+                    onReopenClosed = {},
+                    onBack = {},
+                    tabRuntimeMap = runtimeMap,
+                    onToggleMuteTab = { mutedTabId = it },
+                    onToggleMediaPlayPause = { playPauseTabId = it },
+                    onSeekMedia = { id, delta -> seekedTabId = id; seekDelta = delta },
+                    onMuteAllPlaying = { muteAllClicked = true }
+                )
+            }
+        }
+
+        composeRule.waitForIdle()
+        composeRule.onNodeWithTag("tabs_media_controller_card_21").assertIsDisplayed()
+        composeRule.onNodeWithText("www.youtube.com • Playing").assertIsDisplayed()
+        composeRule.onNodeWithTag("tabs_mute_all_button").assertIsDisplayed()
+
+        composeRule.onNodeWithTag("media_ctrl_rewind_21").performClick()
+        composeRule.waitForIdle()
+        assertEquals(21L, seekedTabId)
+        assertEquals(-10, seekDelta)
+
+        composeRule.onNodeWithTag("media_ctrl_forward_21").performClick()
+        composeRule.waitForIdle()
+        assertEquals(10, seekDelta)
+
+        composeRule.onNodeWithTag("media_ctrl_play_pause_21").performClick()
+        composeRule.waitForIdle()
+        assertEquals(21L, playPauseTabId)
+
+        composeRule.onNodeWithTag("media_ctrl_mute_21").performClick()
+        composeRule.waitForIdle()
+        assertEquals(21L, mutedTabId)
+
+        composeRule.onNodeWithTag("tab_mute_button_22").assertIsDisplayed().performClick()
+        composeRule.waitForIdle()
+        assertEquals(22L, mutedTabId)
+
+        composeRule.onNodeWithTag("tabs_mute_all_button").performClick()
+        composeRule.waitForIdle()
+        assertTrue(muteAllClicked)
+    }
+
+    @Test
+    fun addressBar_displaysOneTapMuteButtonWhenMediaPlayingAndTriggersCallback() {
+        var muteClicked = false
+
+        composeRule.setContent {
+            WeblioTheme {
+                WeblioAddressBar(
+                    urlText = "https://www.youtube.com/watch?v=1",
+                    isHome = false,
+                    isLoading = false,
+                    progress = 100,
+                    isIncognito = false,
+                    isSecureHttps = true,
+                    isDesktopMode = false,
+                    blockedCount = 2,
+                    onSubmitUrl = {},
+                    onRefreshOrStop = {},
+                    onQrClick = {},
+                    onVoiceClick = {},
+                    onExtensionsClick = {},
+                    onShieldClick = {},
+                    isMediaPlaying = true,
+                    isAudioMuted = false,
+                    onToggleMuteClick = { muteClicked = true }
+                )
+            }
+        }
+
+        composeRule.waitForIdle()
+        composeRule.onNodeWithTag("address_audio_mute_button").assertIsDisplayed().performClick()
+        composeRule.waitForIdle()
+        assertTrue(muteClicked)
+    }
+
+    @Test
+    fun browserToolsBottomSheet_displaysMediaControllerStripAndTriggersCallbacks() {
+        var playPauseClicked = false
+        var muteClicked = false
+
+        composeRule.setContent {
+            WeblioTheme {
+                BrowserToolsBottomSheet(
+                    currentUrl = "https://music.example.com/live",
+                    isBookmarked = false,
+                    siteAdBlockEnabled = true,
+                    onDismiss = {},
+                    onBookmarkToggle = {},
+                    onFindInPage = {},
+                    onShareLink = {},
+                    onCopyLink = {},
+                    onToggleSiteAdBlock = {},
+                    onEnterPip = {},
+                    onOpenSitePermissions = {},
+                    onOpenAdBlockDashboard = {},
+                    isMediaPlaying = true,
+                    isAudioMuted = false,
+                    hasMediaSession = true,
+                    mediaTitle = "Chillhop Live",
+                    onToggleMediaPlayPause = { playPauseClicked = true },
+                    onToggleAudioMute = { muteClicked = true }
+                )
+            }
+        }
+
+        composeRule.waitForIdle()
+        composeRule.onNodeWithTag("tools_media_controller_card").assertIsDisplayed()
+        composeRule.onNodeWithText("Chillhop Live").assertIsDisplayed()
+
+        composeRule.onNodeWithTag("tools_media_play_pause").performClick()
+        composeRule.waitForIdle()
+        assertTrue(playPauseClicked)
+
+        composeRule.onNodeWithTag("tools_media_mute_button").performClick()
+        composeRule.waitForIdle()
+        assertTrue(muteClicked)
     }
 }

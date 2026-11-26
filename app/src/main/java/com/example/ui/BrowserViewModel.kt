@@ -95,6 +95,9 @@ data class TabRuntimeState(
     val findActiveMatch: Int = 0,
     val findTotalMatches: Int = 0,
     val isMediaPlaying: Boolean = false,
+    val isAudioMuted: Boolean = false,
+    val mediaTitle: String = "",
+    val hasMediaSession: Boolean = false,
     val isFullScreenVideo: Boolean = false,
     val blockedOnPage: Int = 0,
     val errorBanner: String? = null,
@@ -144,6 +147,7 @@ class BrowserViewModel(application: Application) : AndroidViewModel(application)
     val integrityManager = app.integrityManager
     val updateVerifier = app.updateVerifier
     val backupManager = app.backupManager
+    val importManager = app.importManager
 
     /** Live WebView instances keyed by Tab ID so tabs stay alive across switching & background playback. */
     private val webViewRegistry = mutableMapOf<Long, WebView>()
@@ -1326,6 +1330,88 @@ class BrowserViewModel(application: Application) : AndroidViewModel(application)
         webViewRegistry[tab.id]?.findNext(forward)
     }
 
+    // Tab Audio Mute & Media Controller
+    fun isTabMuted(tabId: Long): Boolean = _tabRuntime.value[tabId]?.isAudioMuted == true
+
+    fun toggleTabMute(tabId: Long) {
+        setTabMuted(tabId, !isTabMuted(tabId))
+    }
+
+    fun setTabMuted(tabId: Long, muted: Boolean) {
+        updateRuntimeState(tabId) { it.copy(isAudioMuted = muted) }
+        webViewRegistry[tabId]?.let { wv ->
+            val js = buildTabMuteJs(muted)
+            wv.post { wv.evaluateJavascript(js, null) }
+        }
+        val rt = _tabRuntime.value[tabId]
+        if (rt?.isMediaPlaying == true) {
+            val host = extractHost(rt.currentUrl).ifBlank { "Weblo Media" }
+            val title = rt.mediaTitle.ifBlank { rt.title }
+            runCatching {
+                app.startService(
+                    android.content.Intent(app, com.example.engine.WeblioMediaService::class.java).apply {
+                        action = com.example.engine.WeblioMediaService.ACTION_START
+                        putExtra(com.example.engine.WeblioMediaService.EXTRA_TITLE, title)
+                        putExtra(com.example.engine.WeblioMediaService.EXTRA_HOST, host)
+                        putExtra(com.example.engine.WeblioMediaService.EXTRA_IS_PLAYING, true)
+                        putExtra(com.example.engine.WeblioMediaService.EXTRA_IS_MUTED, muted)
+                    }
+                )
+            }
+        }
+        showMessage(if (muted) "Tab muted" else "Tab unmuted")
+    }
+
+    fun toggleTabMediaPlayPause(tabId: Long) {
+        val wv = webViewRegistry[tabId]
+        if (wv != null) {
+            val js = buildMediaCommandJs("toggle_play")
+            wv.post { wv.evaluateJavascript(js, null) }
+        } else {
+            showMessage("Open the tab to control its media")
+        }
+    }
+
+    fun seekTabMedia(tabId: Long, deltaSeconds: Int) {
+        val wv = webViewRegistry[tabId] ?: return
+        val js = buildMediaCommandJs("seek", deltaSeconds)
+        wv.post { wv.evaluateJavascript(js, null) }
+    }
+
+    fun muteAllPlayingTabs() {
+        val targets = _tabRuntime.value.values
+            .filter { (it.isMediaPlaying || it.hasMediaSession) && !it.isAudioMuted }
+            .map { it.tabId }
+        if (targets.isEmpty()) return
+        targets.forEach { id ->
+            updateRuntimeState(id) { it.copy(isAudioMuted = true) }
+            webViewRegistry[id]?.let { wv ->
+                val js = buildTabMuteJs(true)
+                wv.post { wv.evaluateJavascript(js, null) }
+            }
+        }
+        showMessage("Muted ${targets.size} tab${if (targets.size == 1) "" else "s"}")
+    }
+
+    fun handleMediaServiceCommand(cmd: String) {
+        val activeId = _activeTabId.value ?: activeTab.value?.id
+        val runtimeMap = _tabRuntime.value
+        val targetTabId = runtimeMap[activeId]?.takeIf { it.isMediaPlaying || it.hasMediaSession }?.tabId
+            ?: runtimeMap.values.firstOrNull { it.isMediaPlaying }?.tabId
+            ?: runtimeMap.values.firstOrNull { it.hasMediaSession }?.tabId
+            ?: return
+        when (cmd) {
+            "play" -> webViewRegistry[targetTabId]?.let { wv ->
+                wv.post { wv.evaluateJavascript(buildMediaCommandJs("play"), null) }
+            }
+            "pause" -> webViewRegistry[targetTabId]?.let { wv ->
+                wv.post { wv.evaluateJavascript(buildMediaCommandJs("pause"), null) }
+            }
+            "toggle_play" -> toggleTabMediaPlayPause(targetTabId)
+            "toggle_mute" -> toggleTabMute(targetTabId)
+        }
+    }
+
     // SSL Error handling — strict security, never silently bypass!
     fun showSslErrorPrompt(tabId: Long, url: String, error: SslError, onCancel: () -> Unit) {
         _sslPrompt.value = SslErrorPrompt(
@@ -2267,6 +2353,73 @@ class BrowserViewModel(application: Application) : AndroidViewModel(application)
         fun computeDisplayedTabCount(tabs: List<TabEntity>, currentTab: TabEntity?): Int {
             val isIncognito = currentTab?.isIncognito == true
             return tabs.count { it.isIncognito == isIncognito }
+        }
+
+        fun buildTabMuteJs(muted: Boolean): String = """
+            ;(function(){
+                try {
+                    window.__weblioTabMuted = $muted;
+                    if (typeof window.__weblioSetMuted === 'function') {
+                        window.__weblioSetMuted($muted);
+                    } else {
+                        document.querySelectorAll('video, audio').forEach(function(el){
+                            el.muted = $muted;
+                        });
+                    }
+                } catch(e) {}
+            })();
+        """.trimIndent()
+
+        fun buildMediaCommandJs(command: String, deltaSeconds: Int = 0): String = when (command) {
+            "play" -> """
+                ;(function(){
+                    try {
+                        var els = Array.prototype.slice.call(document.querySelectorAll('video, audio'));
+                        var target = els.find(function(e){ return !!e.currentSrc || !!e.src || e.readyState > 0; }) || els[0];
+                        if (target && target.paused) target.play();
+                    } catch(e) {}
+                })();
+            """.trimIndent()
+            "pause" -> """
+                ;(function(){
+                    try {
+                        document.querySelectorAll('video, audio').forEach(function(e){
+                            if (!e.paused) e.pause();
+                        });
+                    } catch(e) {}
+                })();
+            """.trimIndent()
+            "toggle_play" -> """
+                ;(function(){
+                    try {
+                        if (typeof window.__weblioTogglePlayPause === 'function') {
+                            window.__weblioTogglePlayPause();
+                        } else {
+                            var els = Array.prototype.slice.call(document.querySelectorAll('video, audio'));
+                            var playing = els.find(function(e){ return !e.paused && !e.ended; });
+                            if (playing) { playing.pause(); }
+                            else {
+                                var cand = els.find(function(e){ return !!e.currentSrc || !!e.src || e.readyState > 0; }) || els[0];
+                                if (cand) cand.play();
+                            }
+                        }
+                    } catch(e) {}
+                })();
+            """.trimIndent()
+            "seek" -> """
+                ;(function(){
+                    try {
+                        if (typeof window.__weblioSeekBy === 'function') {
+                            window.__weblioSeekBy($deltaSeconds);
+                        } else {
+                            var els = Array.prototype.slice.call(document.querySelectorAll('video, audio'));
+                            var target = els.find(function(e){ return !e.paused; }) || els.find(function(e){ return e.readyState > 0; }) || els[0];
+                            if (target) target.currentTime = Math.max(0, (target.currentTime || 0) + ($deltaSeconds));
+                        }
+                    } catch(e) {}
+                })();
+            """.trimIndent()
+            else -> ""
         }
 
         const val STALE_TAB_RELOAD_MS = 10L * 60_000L

@@ -483,6 +483,36 @@ class WeblioRepository(private val db: WeblioDatabase) {
     suspend fun addBookmark(profileId: Long, title: String, url: String, folder: String = "General") {
         bookmarkDao.insert(BookmarkEntity(profileId = profileId, title = title.ifBlank { url }, url = url, folder = folder.ifBlank { "General" }))
     }
+    suspend fun importBookmarksDeduplicated(
+        profileId: Long,
+        items: List<Triple<String, String, String>>
+    ): Int {
+        val existingUrls = bookmarkDao.getOnce(profileId).map { it.url.trim() }.toHashSet()
+        val toInsert = ArrayList<BookmarkEntity>()
+        val now = System.currentTimeMillis()
+        for ((index, item) in items.withIndex()) {
+            val (rawUrl, rawTitle, rawFolder) = item
+            val cleanUrl = rawUrl.trim()
+            if ((cleanUrl.startsWith("https://", true) || cleanUrl.startsWith("http://", true)) &&
+                existingUrls.add(cleanUrl)
+            ) {
+                toInsert.add(
+                    BookmarkEntity(
+                        profileId = profileId,
+                        title = rawTitle.trim().ifBlank { cleanUrl }.take(200),
+                        url = cleanUrl,
+                        folder = rawFolder.trim().ifBlank { "Imported" }.take(64),
+                        createdAt = now + index
+                    )
+                )
+            }
+        }
+        if (toInsert.isNotEmpty()) {
+            toInsert.chunked(500).forEach { bookmarkDao.insertAll(it) }
+        }
+        return toInsert.size
+    }
+
     suspend fun updateBookmark(bookmark: BookmarkEntity) = bookmarkDao.update(bookmark)
     suspend fun deleteBookmark(bookmark: BookmarkEntity) = bookmarkDao.delete(bookmark)
     suspend fun removeBookmarkByUrl(profileId: Long, url: String) = bookmarkDao.deleteByUrl(profileId, url)
@@ -491,6 +521,78 @@ class WeblioRepository(private val db: WeblioDatabase) {
         if (isIncognito || isGuest || url.startsWith("weblio://") || url.isBlank()) return
         historyDao.insert(HistoryEntity(profileId = profileId, title = title.ifBlank { url }, url = url))
     }
+
+    suspend fun importHistoryEntries(
+        profileId: Long,
+        entries: List<Triple<String, String, Long>>
+    ): Int {
+        val existingKeys = historyDao.getOnce(profileId)
+            .map { "${it.url.trim()}|${it.visitedAt / 60_000L}" }
+            .toHashSet()
+        val existingUrlsOnly = historyDao.getOnce(profileId).map { it.url.trim() }.toHashSet()
+        val now = System.currentTimeMillis()
+        val toInsert = ArrayList<HistoryEntity>()
+        for ((index, entry) in entries.take(5000).withIndex()) {
+            val (rawUrl, rawTitle, rawTs) = entry
+            val cleanUrl = rawUrl.trim()
+            if (!(cleanUrl.startsWith("https://", true) || cleanUrl.startsWith("http://", true))) continue
+            val ts = if (rawTs > 0L) rawTs else (now - index * 1000L)
+            val key = "$cleanUrl|${ts / 60_000L}"
+            val shouldAdd = if (rawTs > 0L) {
+                existingKeys.add(key)
+            } else {
+                existingUrlsOnly.add(cleanUrl) && existingKeys.add(key)
+            }
+            if (shouldAdd) {
+                toInsert.add(
+                    HistoryEntity(
+                        profileId = profileId,
+                        title = rawTitle.trim().ifBlank { cleanUrl }.take(200),
+                        url = cleanUrl,
+                        visitedAt = ts
+                    )
+                )
+            }
+        }
+        if (toInsert.isNotEmpty()) {
+            toInsert.chunked(500).forEach { historyDao.insertAll(it) }
+        }
+        return toInsert.size
+    }
+
+    suspend fun importQuickLinksDeduplicated(
+        profileId: Long,
+        items: List<Pair<String, String>>,
+        maxAdditions: Int = 8
+    ): Int {
+        val existing = quickLinkDao.getOnce(profileId)
+        val existingUrls = existing.map { it.url.trim().trimEnd('/').lowercase() }.toHashSet()
+        var nextPos = (existing.maxOfOrNull { it.position } ?: -1) + 1
+        val toInsert = ArrayList<QuickLinkEntity>()
+        for ((rawTitle, rawUrl) in items) {
+            if (toInsert.size >= maxAdditions) break
+            val cleanUrl = rawUrl.trim()
+            val normKey = cleanUrl.trimEnd('/').lowercase()
+            if ((cleanUrl.startsWith("https://", true) || cleanUrl.startsWith("http://", true)) &&
+                existingUrls.add(normKey)
+            ) {
+                toInsert.add(
+                    QuickLinkEntity(
+                        profileId = profileId,
+                        title = rawTitle.trim().ifBlank { cleanUrl }.take(40),
+                        url = cleanUrl,
+                        iconKey = "globe",
+                        position = nextPos++
+                    )
+                )
+            }
+        }
+        if (toInsert.isNotEmpty()) {
+            quickLinkDao.insertAll(toInsert)
+        }
+        return toInsert.size
+    }
+
     suspend fun deleteHistoryEntry(id: Long) = historyDao.deleteById(id)
     suspend fun clearHistorySince(profileId: Long, sinceMillis: Long) = historyDao.deleteSince(profileId, sinceMillis)
     suspend fun clearAllHistory(profileId: Long) = historyDao.clearAllForProfile(profileId)

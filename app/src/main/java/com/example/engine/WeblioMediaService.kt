@@ -46,15 +46,26 @@ class WeblioMediaService : Service() {
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
-        if (intent?.action == ACTION_STOP) {
-            stopForeground(STOP_FOREGROUND_REMOVE)
-            stopSelf()
-            return START_NOT_STICKY
+        when (intent?.action) {
+            ACTION_STOP -> {
+                stopForeground(STOP_FOREGROUND_REMOVE)
+                stopSelf()
+                return START_NOT_STICKY
+            }
+            ACTION_TOGGLE_PLAY_PAUSE -> {
+                sendBroadcast(Intent(BROADCAST_MEDIA_ACTION).putExtra("cmd", "toggle_play").setPackage(packageName))
+                return START_NOT_STICKY
+            }
+            ACTION_TOGGLE_MUTE -> {
+                sendBroadcast(Intent(BROADCAST_MEDIA_ACTION).putExtra("cmd", "toggle_mute").setPackage(packageName))
+                return START_NOT_STICKY
+            }
         }
 
         val title = intent?.getStringExtra(EXTRA_TITLE) ?: "Weblo Media"
         val host = intent?.getStringExtra(EXTRA_HOST) ?: "Playing in background"
         val isPlaying = intent?.getBooleanExtra(EXTRA_IS_PLAYING, true) ?: true
+        val isMuted = intent?.getBooleanExtra(EXTRA_IS_MUTED, false) ?: false
 
         mediaSession?.setMetadata(
             MediaMetadataCompat.Builder()
@@ -63,7 +74,7 @@ class WeblioMediaService : Service() {
                 .build()
         )
         updatePlaybackState(isPlaying)
-        postMediaNotification(title, host, isPlaying)
+        postMediaNotification(title, host, isPlaying, isMuted)
         return START_STICKY
     }
 
@@ -82,7 +93,7 @@ class WeblioMediaService : Service() {
         )
     }
 
-    private fun postMediaNotification(title: String, host: String, isPlaying: Boolean) {
+    private fun postMediaNotification(title: String, host: String, isPlaying: Boolean, isMuted: Boolean) {
         val nm = getSystemService(NotificationManager::class.java)
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
             nm.createNotificationChannel(
@@ -97,28 +108,40 @@ class WeblioMediaService : Service() {
             PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT
         )
 
-        val stopIntent = PendingIntent.getService(
+        val playPauseIntent = PendingIntent.getService(
             this,
             1,
-            Intent(this, WeblioMediaService::class.java).setAction(ACTION_STOP),
-            PendingIntent.FLAG_IMMUTABLE
+            Intent(this, WeblioMediaService::class.java).setAction(ACTION_TOGGLE_PLAY_PAUSE),
+            PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT
+        )
+
+        val muteIntent = PendingIntent.getService(
+            this,
+            2,
+            Intent(this, WeblioMediaService::class.java).setAction(ACTION_TOGGLE_MUTE),
+            PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT
         )
 
         val notification = NotificationCompat.Builder(this, CHANNEL_ID)
             .setSmallIcon(R.mipmap.ic_launcher)
             .setContentTitle(title)
-            .setContentText(host)
+            .setContentText(if (isMuted) "$host • Muted" else host)
             .setContentIntent(contentIntent)
             .setVisibility(NotificationCompat.VISIBILITY_PUBLIC)
             .addAction(
-                android.R.drawable.ic_media_pause,
+                if (isPlaying) android.R.drawable.ic_media_pause else android.R.drawable.ic_media_play,
                 if (isPlaying) "Pause" else "Play",
-                stopIntent
+                playPauseIntent
+            )
+            .addAction(
+                if (isMuted) android.R.drawable.ic_lock_silent_mode_off else android.R.drawable.ic_lock_silent_mode,
+                if (isMuted) "Unmute" else "Mute",
+                muteIntent
             )
             .setStyle(
                 androidx.media.app.NotificationCompat.MediaStyle()
                     .setMediaSession(mediaSession?.sessionToken)
-                    .setShowActionsInCompactView(0)
+                    .setShowActionsInCompactView(0, 1)
             )
             .setOngoing(isPlaying)
             .build()
@@ -137,10 +160,13 @@ class WeblioMediaService : Service() {
     companion object {
         const val ACTION_START = "com.example.engine.MEDIA_START"
         const val ACTION_STOP = "com.example.engine.MEDIA_STOP"
+        const val ACTION_TOGGLE_PLAY_PAUSE = "com.example.engine.MEDIA_TOGGLE_PLAY"
+        const val ACTION_TOGGLE_MUTE = "com.example.engine.MEDIA_TOGGLE_MUTE"
         const val BROADCAST_MEDIA_ACTION = "com.example.engine.MEDIA_CMD"
         const val EXTRA_TITLE = "extra_title"
         const val EXTRA_HOST = "extra_host"
         const val EXTRA_IS_PLAYING = "extra_is_playing"
+        const val EXTRA_IS_MUTED = "extra_is_muted"
         private const val CHANNEL_ID = "weblio_media_playback"
         private const val NOTIF_ID = 5109
     }
